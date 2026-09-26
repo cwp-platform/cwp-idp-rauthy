@@ -1,0 +1,20 @@
+[package]
+name = "rauthy-consents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Rauthy consent management extension"
+
+[dependencies]
+actix-web = { workspace = true }
+chrono = { workspace = true }
+hiqlite = { workspace = true }
+rauthy-common = { path = "../common" }
+rauthy-data = { path = "../data" }
+rauthy-derive = { path = "../macros" }
+rauthy-error = { path = "../error" }
+serde = { workspace = true }
+tokio-postgres = { workspace = true }
+utoipa = { workspace = true }
+validator = { workspace = true }
