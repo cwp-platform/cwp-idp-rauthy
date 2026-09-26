@@ -176,6 +176,11 @@ export const I18nZh: I18n = {
         requestExpired: '请求已过期',
         signUp: '用户注册',
         validEmail: '提供有效的电子邮件地址',
+        consentsTitle: '同意',
+        consentsInfo: '部分同意文档已更改。请确认。',
+        consentsOpen: '打开文档',
+        consentsRequiredShort: '必填',
+        consentsConfirm: '确认',
     },
     device: {
         accept: '接受',
@@ -293,6 +298,10 @@ export const I18nZh: I18n = {
         register: '注册',
         success: '注册成功',
         userReg: '用户注册',
+        consentsTitle: '同意',
+        consentsOpen: '打开文档',
+        consentsRequired: '请接受所有必填同意',
+        consentsRequiredShort: '必填',
     },
     tos: {
         acceptOptUntil: '接受是可选的直到：',

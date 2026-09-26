@@ -14,4 +14,6 @@ export interface NewUserRegistrationRequest {
     pow: string;
     /// Validation: PATTERN_URI
     redirect_uri?: string;
+    /// Ids of the consent documents accepted during registration.
+    consents?: string[];
 }

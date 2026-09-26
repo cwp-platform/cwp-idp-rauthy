@@ -155,6 +155,11 @@ export interface I18n {
         requestExpired: string;
         signUp: string;
         validEmail: string;
+        consentsTitle: string;
+        consentsInfo: string;
+        consentsOpen: string;
+        consentsRequiredShort: string;
+        consentsConfirm: string;
     };
     device: {
         accept: string;
@@ -265,6 +270,10 @@ export interface I18n {
         register: string;
         success: string;
         userReg: string;
+        consentsTitle: string;
+        consentsOpen: string;
+        consentsRequired: string;
+        consentsRequiredShort: string;
     };
     tos: {
         acceptOptUntil: string;

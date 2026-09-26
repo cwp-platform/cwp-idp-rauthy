@@ -44,6 +44,7 @@
     import { PATTERN_ATPROTO_ID } from '$utils/patterns';
     import type { ToSAwaitLoginResponse, ToSLatestResponse } from '$api/types/tos';
     import TosAccept from '$lib/TosAccept.svelte';
+    import type { ConsentAcceptRequest, ConsentPendingItem } from '$api/types/consents';
     import { execProviderLogin } from '$utils/login';
     import Modal from '$lib/Modal.svelte';
     import Loading from '$lib/Loading.svelte';
@@ -107,6 +108,12 @@
 
     let tos: undefined | ToSLatestResponse = $state();
     let tosAcceptCode = $state('');
+
+    let pendingConsents: ConsentPendingItem[] = $state([]);
+    let pendingConsentChoices: Record<string, boolean> = $state({});
+    let pendingLoc = $state('');
+    let consentErr = $state('');
+    let consentAccepting = $state(false);
 
     let hasAutoLoggedIn = false;
     let showModalUpdate = $state(false);
@@ -346,7 +353,7 @@
                 console.error('location header missing');
                 return;
             }
-            window.location.replace(loc);
+            await redirectWithConsentCheck(loc);
         } else if (res.status === 200) {
             // -> all good, but needs additional passkey validation
             err = '';
@@ -475,13 +482,66 @@
         mfaPurpose = undefined;
     }
 
+    /** Before the final redirect, check whether the user must (or may) re-confirm
+     *  changed consent documents (`reconfirm = login`). If yes, show the inline
+     *  gate instead of redirecting; on confirm the accepted documents are recorded
+     *  and the redirect is resumed. */
+    async function redirectWithConsentCheck(loc: string) {
+        let res = await fetchPost<ConsentPendingItem[]>(
+            '/auth/v1/consents/pending',
+            undefined,
+            'json',
+            'noRedirect',
+        );
+        if (res.body && res.body.length > 0) {
+            let choices: Record<string, boolean> = {};
+            for (let c of res.body) {
+                choices[c.id] = c.required;
+            }
+            pendingConsents = res.body;
+            pendingConsentChoices = choices;
+            pendingLoc = loc;
+            consentErr = '';
+            return;
+        }
+        window.location.replace(loc);
+    }
+
+    async function acceptPendingConsents() {
+        consentAccepting = true;
+        consentErr = '';
+
+        let items = pendingConsents
+            .filter(c => pendingConsentChoices[c.id])
+            .map(c => ({ id: c.id, version: c.version }));
+        if (items.length === 0) {
+            window.location.replace(pendingLoc);
+            return;
+        }
+
+        let payload: ConsentAcceptRequest = { consents: items };
+        let res = await fetchPost<undefined>(
+            '/auth/v1/consents/accept',
+            payload,
+            'json',
+            'noRedirect',
+        );
+        if (res.status === 200) {
+            window.location.replace(pendingLoc);
+        } else {
+            consentErr = res.error?.message || 'Error';
+        }
+
+        consentAccepting = false;
+    }
+
     function onWebauthnError(error: string) {
         // If there is any error with the key, the user should start a new login process
         mfaPurpose = undefined;
         err = error;
     }
 
-    function onWebauthnSuccess(data?: WebauthnAdditionalData) {
+    async function onWebauthnSuccess(data?: WebauthnAdditionalData) {
         if (!data) {
             // will be empty if the user needs to update values
             mfaPurpose = undefined;
@@ -490,7 +550,7 @@
         }
 
         if ('loc' in data) {
-            window.location.replace(data.loc as string);
+            await redirectWithConsentCheck(data.loc as string);
         } else if ('tos_await_code' in data) {
             // login successful, but the user needs to accept updated ToS
             tosAcceptCode = data.tos_await_code as string;
@@ -716,6 +776,47 @@
                     </div>
                 {/if}
 
+                {#if pendingConsents.length > 0}
+                    <div class="consents">
+                        <div class="consentsTitle">{t.authorize.consentsTitle}</div>
+                        <p class="consentsInfo">{t.authorize.consentsInfo}</p>
+                        {#each pendingConsents as consent (consent.id)}
+                            <label class="consentRow">
+                                <input
+                                    type="checkbox"
+                                    bind:checked={pendingConsentChoices[consent.id]}
+                                    disabled={consent.required}
+                                />
+                                <span>
+                                    {consent.title}
+                                    <a href={consent.url} target="_blank" rel="noreferrer">
+                                        {t.authorize.consentsOpen}
+                                    </a>
+                                    {#if consent.required}
+                                        <span class="consentRequired">
+                                            ({t.authorize.consentsRequiredShort})
+                                        </span>
+                                    {/if}
+                                </span>
+                            </label>
+                        {/each}
+                        {#if consentErr}
+                            <div class="errMsg">
+                                {consentErr}
+                            </div>
+                        {/if}
+                        <div class="btn flex-col">
+                            <Button
+                                ariaLabel={t.authorize.consentsConfirm}
+                                onclick={acceptPendingConsents}
+                                isLoading={consentAccepting}
+                            >
+                                {t.authorize.consentsConfirm}
+                            </Button>
+                        </div>
+                    </div>
+                {/if}
+
                 {#if tos}
                     <TosAccept {tos} {tosAcceptCode} onToSAccept={handleAuthRes} {onToSCancel} />
                 {/if}
@@ -797,6 +898,42 @@
         max-width: 18rem;
         text-wrap: wrap;
         color: hsl(var(--error));
+    }
+
+    .consents {
+        margin-top: 1rem;
+        padding: 0.75rem;
+        border-radius: 5px;
+        border: 1px solid hsl(var(--bg-high));
+        background: hsla(var(--bg-high) / 0.25);
+    }
+
+    .consentsTitle {
+        font-size: 0.9rem;
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+    }
+
+    .consentsInfo {
+        margin: 0 0 0.5rem 0;
+        font-size: 0.8rem;
+        color: hsla(var(--text) / 0.7);
+    }
+
+    .consentRow {
+        display: flex;
+        gap: 0.5rem;
+        align-items: flex-start;
+        margin-bottom: 0.5rem;
+        font-size: 0.85rem;
+    }
+
+    .consentRow a {
+        margin-left: 0.25rem;
+    }
+
+    .consentRequired {
+        color: hsla(var(--text) / 0.6);
     }
 
     .flex-col {

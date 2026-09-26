@@ -12,6 +12,7 @@ jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
 rauthy-common = { path = "../common" }
+rauthy-consents = { path = "../rauthy-consents" }
 rauthy-error = { path = "../error" }
 rauthy-handlers = { path = "../api" }
 rauthy-jwt = { path = "../jwt" }

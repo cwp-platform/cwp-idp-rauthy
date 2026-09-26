@@ -191,6 +191,11 @@ export const I18nNl: I18n = {
         requestExpired: 'Verzoek is verlopen',
         signUp: 'Gebruikersregistratie',
         validEmail: 'Geef een geldig e-mailadres op',
+        consentsTitle: 'Toestemmingen',
+        consentsInfo: 'Sommige toestemmingsdocumenten zijn gewijzigd. Bevestig.',
+        consentsOpen: 'Document openen',
+        consentsRequiredShort: 'verplicht',
+        consentsConfirm: 'Bevestigen',
     },
     device: {
         accept: 'Accepteren',
@@ -313,6 +318,10 @@ export const I18nNl: I18n = {
         register: 'Registreren',
         success: 'Registratie geslaagd',
         userReg: 'Gebruikersregistratie',
+        consentsTitle: 'Toestemmingen',
+        consentsOpen: 'Document openen',
+        consentsRequired: 'Accepteer alle verplichte toestemmingen',
+        consentsRequiredShort: 'verplicht',
     },
     tos: {
         acceptOptUntil: 'Accepteren is optioneel tot:',

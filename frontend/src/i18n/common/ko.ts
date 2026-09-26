@@ -184,6 +184,11 @@ export const I18nKo: I18n = {
         requestExpired: '요청이 만료되었습니다.',
         signUp: '사용자 가입',
         validEmail: '비정상적인 이메일 주소',
+        consentsTitle: '동의',
+        consentsInfo: '일부 동의 문서가 변경되었습니다. 확인해 주세요.',
+        consentsOpen: '문서 열기',
+        consentsRequiredShort: '필수',
+        consentsConfirm: '확인',
     },
     device: {
         accept: '수락',
@@ -302,6 +307,10 @@ export const I18nKo: I18n = {
         register: '가입',
         success: '성공적으로 가입되었습니다.',
         userReg: '사용자 가입',
+        consentsTitle: '동의',
+        consentsOpen: '문서 열기',
+        consentsRequired: '모든 필수 동의를 수락하세요',
+        consentsRequiredShort: '필수',
     },
     tos: {
         acceptOptUntil: 'Accept is optional until:',

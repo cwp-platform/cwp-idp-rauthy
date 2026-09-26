@@ -34,6 +34,7 @@
     <NavLinkSub href="/auth/v1/admin/config/tos">
         {ta.tos.tos}
     </NavLinkSub>
+    <NavLinkSub href="/auth/v1/admin/config/consents">Consents</NavLinkSub>
 </NavSub>
 
 <ContentAdmin>

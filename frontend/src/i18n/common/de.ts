@@ -196,6 +196,11 @@ export const I18nDe: I18n = {
         requestExpired: 'Anfrage ist abgelaufen',
         signUp: 'Benutzer Registrierung',
         validEmail: 'Gültige E-Mail Adresse angeben',
+        consentsTitle: 'Einwilligungen',
+        consentsInfo: 'Einige Einwilligungsdokumente haben sich geändert. Bitte bestätigen.',
+        consentsOpen: 'Dokument öffnen',
+        consentsRequiredShort: 'erforderlich',
+        consentsConfirm: 'Bestätigen',
     },
     device: {
         accept: 'Akzeptieren',
@@ -320,6 +325,10 @@ export const I18nDe: I18n = {
         register: 'Registrieren',
         success: 'Registrierung erfolgreich',
         userReg: 'Benutzer Registrierung',
+        consentsTitle: 'Einwilligungen',
+        consentsOpen: 'Dokument öffnen',
+        consentsRequired: 'Bitte akzeptieren Sie alle erforderlichen Einwilligungen',
+        consentsRequiredShort: 'erforderlich',
     },
     tos: {
         acceptOptUntil: 'Akzeptieren ist optional bis:',

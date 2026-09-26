@@ -405,7 +405,7 @@ pub async fn post_users_register(
 #[inline(always)]
 pub async fn post_users_register_handle(
     req: HttpRequest,
-    payload: NewUserRegistrationRequest,
+    mut payload: NewUserRegistrationRequest,
 ) -> Result<HttpResponse, ErrorResponse> {
     if !RauthyConfig::get().vars.user_registration.enable {
         return Err(ErrorResponse::new(
@@ -467,6 +467,8 @@ pub async fn post_users_register_handle(
 
     let lang = Language::try_from(&req).unwrap_or_default();
     let email = payload.email.clone();
+    let consents = payload.consents.take();
+    let reg_consents = rauthy_consents::validate_registration_consents(consents.as_deref()).await?;
     let user = match User::create_from_reg(payload, lang).await {
         Ok(u) => u,
         Err(err) => {
@@ -507,6 +509,12 @@ pub async fn post_users_register_handle(
         let ip = real_ip_from_req(&req)?;
         let loc = get_location(&req, ip)?;
         ToSUserAccept::create(user.id.clone(), tos.ts, ip, loc).await?;
+    }
+
+    if !reg_consents.is_empty() {
+        let ip = real_ip_from_req(&req)?;
+        let loc = get_location(&req, ip)?;
+        rauthy_consents::record_registration_consents(&user.id, &reg_consents, ip, loc).await?;
     }
 
     task::spawn(async move {
