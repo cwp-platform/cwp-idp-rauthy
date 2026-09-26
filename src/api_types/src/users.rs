@@ -105,6 +105,9 @@ pub struct NewUserRegistrationRequest {
     /// Validation: `[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%]+`
     #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]+"))]
     pub redirect_uri: Option<String>,
+    /// Ids of the consent documents accepted during registration (max 64).
+    #[validate(length(max = 64))]
+    pub consents: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Validate, ToSchema)]

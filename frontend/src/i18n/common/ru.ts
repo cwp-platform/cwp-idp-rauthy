@@ -191,6 +191,11 @@ export const I18nRu: I18n = {
         requestExpired: 'Запрос истёк',
         signUp: 'Регистрация пользователя',
         validEmail: 'Укажите действительный адрес эл. почты',
+        consentsTitle: 'Согласия',
+        consentsInfo: 'Некоторые документы согласия изменились. Подтвердите.',
+        consentsOpen: 'Открыть документ',
+        consentsRequiredShort: 'обязательно',
+        consentsConfirm: 'Подтвердить',
     },
     device: {
         accept: 'Принять',
@@ -311,6 +316,10 @@ export const I18nRu: I18n = {
         register: 'Зарегистрироваться',
         success: 'Регистрация успешна',
         userReg: 'Регистрация пользователя',
+        consentsTitle: 'Согласия',
+        consentsOpen: 'Открыть документ',
+        consentsRequired: 'Необходимо принять все обязательные согласия',
+        consentsRequiredShort: 'обязательно',
     },
     tos: {
         acceptOptUntil: 'Принятие необязательно до:',

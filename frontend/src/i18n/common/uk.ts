@@ -195,6 +195,11 @@ export const I18nUk: I18n = {
         requestExpired: 'Термін дії запиту минув',
         signUp: 'Реєстрація',
         validEmail: 'Введіть коректну адресу E-Mail',
+        consentsTitle: 'Згоди',
+        consentsInfo: 'Деякі документи згоди змінилися. Підтвердіть.',
+        consentsOpen: 'Відкрити документ',
+        consentsRequiredShort: "обов'язково",
+        consentsConfirm: 'Підтвердити',
     },
     device: {
         accept: 'Прийняти',
@@ -317,6 +322,10 @@ export const I18nUk: I18n = {
         register: 'Зареєструватися',
         success: 'Реєстрація успішна',
         userReg: 'Реєстрація користувача',
+        consentsTitle: 'Згоди',
+        consentsOpen: 'Відкрити документ',
+        consentsRequired: "Необхідно прийняти всі обов'язкові згоди",
+        consentsRequiredShort: "обов'язково",
     },
     tos: {
         acceptOptUntil: "Прийняття необов'язкове до:",

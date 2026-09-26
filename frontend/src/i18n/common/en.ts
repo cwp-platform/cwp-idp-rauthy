@@ -189,6 +189,11 @@ export const I18nEn: I18n = {
         requestExpired: 'Request has expired',
         signUp: 'User Registration',
         validEmail: 'Provide valid E-Mail address',
+        consentsTitle: 'Consents',
+        consentsInfo: 'Some consent documents have changed. Please confirm.',
+        consentsOpen: 'Open document',
+        consentsRequiredShort: 'required',
+        consentsConfirm: 'Confirm',
     },
     device: {
         accept: 'Accept',
@@ -311,6 +316,10 @@ export const I18nEn: I18n = {
         register: 'Register',
         success: 'Registration successful',
         userReg: 'User Registration',
+        consentsTitle: 'Consents',
+        consentsOpen: 'Open document',
+        consentsRequired: 'Please accept all required consents',
+        consentsRequiredShort: 'required',
     },
     tos: {
         acceptOptUntil: 'Accept is optional until:',

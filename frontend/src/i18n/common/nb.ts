@@ -188,6 +188,11 @@ export const I18nNb: I18n = {
         requestExpired: 'Forespørselen er utløpt',
         signUp: 'Brukerregistrering',
         validEmail: 'Oppgi gyldig e-postadresse',
+        consentsTitle: 'Samtykker',
+        consentsInfo: 'Noen samtykkedokumenter er endret. Vennligst bekreft.',
+        consentsOpen: 'Åpne dokument',
+        consentsRequiredShort: 'obligatorisk',
+        consentsConfirm: 'Bekreft',
     },
     device: {
         accept: 'Godta',
@@ -308,6 +313,10 @@ export const I18nNb: I18n = {
         register: 'Registrer',
         success: 'Registrering vellykket',
         userReg: 'Brukerregistrering',
+        consentsTitle: 'Samtykker',
+        consentsOpen: 'Åpne dokument',
+        consentsRequired: 'Vennligst godta alle obligatoriske samtykker',
+        consentsRequiredShort: 'obligatorisk',
     },
     tos: {
         acceptOptUntil: 'Accept is optional until:',

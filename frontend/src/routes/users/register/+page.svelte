@@ -26,9 +26,8 @@
     } from '$utils/patterns';
     import type { NewUserRegistrationRequest } from '$api/types/register.ts';
     import { fetchGet, fetchPost } from '$api/fetch';
-    import type { ToSLatestResponse } from '$api/types/tos';
+    import type { ConsentDocPublic } from '$api/types/consents';
     import { fetchSolvePow } from '$utils/pow';
-    import TosAccept from '$lib/TosAccept.svelte';
     import type { UserValuesConfig } from '$api/templates/UserValuesConfig';
     import InputDateTimeCombo from '$lib/form/InputDateTimeCombo.svelte';
     import TZSelect from '$lib/TZSelect.svelte';
@@ -54,9 +53,21 @@
     let err = $state('');
     let success = $state(false);
 
-    let tos: undefined | ToSLatestResponse = $state();
-    let noTosExists = $state(false);
     let usernameExists = $state(false);
+
+    let consents: ConsentDocPublic[] = $state([]);
+    let accepted: Record<string, boolean> = $state({});
+
+    $effect(() => {
+        fetchConsents();
+    });
+
+    async function fetchConsents() {
+        let res = await fetchGet<ConsentDocPublic[]>('/auth/v1/consents/public');
+        if (res.body) {
+            consents = res.body;
+        }
+    }
 
     let values: NewUserRegistrationRequest = $state({
         email: '',
@@ -139,18 +150,6 @@
         }
     }
 
-    async function fetchTos() {
-        tos = undefined;
-        noTosExists = false;
-
-        let res = await fetchGet<ToSLatestResponse>('/auth/v1/tos/latest');
-        if (res.body) {
-            tos = res.body;
-        } else if (res.status === 204) {
-            noTosExists = true;
-        }
-    }
-
     async function providerLogin(id: string) {
         let pkce = await generatePKCE();
         if (!pkce) {
@@ -201,19 +200,22 @@
             return;
         }
 
-        await fetchTos();
-
-        if (tos) {
-            // noop
-        } else if (noTosExists) {
-            await submitRegistration();
-        } else {
-            console.error('logic error in ToS fetch / accept');
+        for (let c of consents) {
+            if (c.required && !accepted[c.id]) {
+                err = t.register.consentsRequired;
+                return;
+            }
         }
+
+        await submitRegistration();
     }
 
     async function submitRegistration() {
         isLoading = true;
+
+        values.consents = Object.entries(accepted)
+            .filter(([, v]) => v)
+            .map(([id]) => id);
 
         values.pow = (await fetchSolvePow()) || '';
         values.redirect_uri = redirectUri.get();
@@ -388,6 +390,32 @@
                     {/if}
                 </div>
 
+                {#if consents.length > 0}
+                    <div class="consents">
+                        <div class="consentsTitle">{t.register.consentsTitle}</div>
+                        {#each consents as consent (consent.id)}
+                            <label class="consentRow">
+                                <input
+                                    type="checkbox"
+                                    bind:checked={accepted[consent.id]}
+                                    required={consent.required}
+                                />
+                                <span>
+                                    {consent.title}
+                                    <a href={consent.url} target="_blank" rel="noreferrer">
+                                        {t.register.consentsOpen}
+                                    </a>
+                                    {#if consent.required}
+                                        <span class="consentRequired"
+                                            >({t.register.consentsRequiredShort})</span
+                                        >
+                                    {/if}
+                                </span>
+                            </label>
+                        {/each}
+                    </div>
+                {/if}
+
                 <div class="submit">
                     <Button type="submit" {isLoading}>{t.register.register}</Button>
                 </div>
@@ -424,16 +452,6 @@
                 {/if}
             </Form>
         </div>
-
-        {#if tos}
-            <TosAccept
-                {tos}
-                forceAccept
-                onToSAccept={submitRegistration}
-                onToSCancel={() => (tos = undefined)}
-                skipRequest
-            />
-        {/if}
 
         <ThemeSwitch absolute />
         <LangSelector absolute />
@@ -491,6 +509,35 @@
 
     .submit {
         margin-top: 1rem;
+    }
+
+    .consents {
+        margin-top: 1rem;
+        padding: 0.75rem;
+        border-radius: var(--border-radius);
+        background: hsla(var(--bg-high) / 0.5);
+    }
+
+    .consentsTitle {
+        font-size: 0.9rem;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+    }
+
+    .consentRow {
+        display: flex;
+        gap: 0.5rem;
+        align-items: flex-start;
+        margin-bottom: 0.5rem;
+        font-size: 0.85rem;
+    }
+
+    .consentRow a {
+        margin-left: 0.25rem;
+    }
+
+    .consentRequired {
+        color: hsla(var(--text) / 0.6);
     }
 
     @media (min-width: 35rem) {
