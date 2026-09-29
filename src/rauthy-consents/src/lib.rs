@@ -9,8 +9,11 @@ use crate::types::{
 };
 
 pub mod api;
+pub mod bootstrap;
 pub mod entity;
 pub mod types;
+
+pub use bootstrap::seed as bootstrap;
 
 /// All `/consents` routes under the `/auth/v1` scope.
 pub fn consents_scope() -> Scope {

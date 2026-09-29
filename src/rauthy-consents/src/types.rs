@@ -89,3 +89,19 @@ pub struct RegistrationConsent {
     pub version: i32,
     pub url: String,
 }
+
+/// Consent document from `{bootstrap_dir}/consents.json` (native seed).
+/// Version is always `1` on insert; version bumps happen only via Admin UI.
+#[derive(Debug, Deserialize, Validate)]
+pub struct ConsentDocBootstrap {
+    #[validate(length(min = 1, max = 64))]
+    pub id: String,
+    #[validate(length(min = 1, max = 200))]
+    pub title: String,
+    #[validate(length(min = 1, max = 500))]
+    pub url: String,
+    pub required: bool,
+    #[validate(length(min = 1, max = 16))]
+    pub reconfirm: String,
+    pub enabled: bool,
+}

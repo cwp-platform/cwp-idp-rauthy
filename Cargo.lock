@@ -5064,7 +5064,10 @@ dependencies = [
  "rauthy-derive",
  "rauthy-error",
  "serde",
+ "serde_json",
+ "tokio",
  "tokio-postgres",
+ "tracing",
  "utoipa",
  "validator",
 ]

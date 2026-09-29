@@ -109,6 +109,11 @@ pub async fn run(
     debug!("Applying database migrations");
     DB::migrate().await.expect("Database migration error");
 
+    // Нативная сидка consent-документов (bootstrap/consents.json) — таблицы уже есть.
+    rauthy_consents::bootstrap()
+        .await
+        .expect("Consents bootstrap error");
+
     debug!("Starting Events handler");
     EventNotifier::init_notifiers(tx_email).await.unwrap();
     tokio::spawn(EventListener::listen(
