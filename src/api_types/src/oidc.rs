@@ -192,6 +192,7 @@ pub struct AuthRequest {
     pub redirect_uri: Option<String>,
     /// Validation: `[a-z0-9-_/]{2,128}`
     #[validate(regex(path = "*RE_LOWERCASE", code = "[a-z0-9-_/]{2,128}"))]
+    #[serde(default = "default_response_type")]
     pub response_type: String,
     /// Validation: `[a-zA-Z0-9-_/:\s*]{0,512}`
     #[validate(regex(path = "*RE_SCOPE_SPACE", code = "[a-zA-Z0-9-_/:\\s*]{0,512}"))]
@@ -223,6 +224,11 @@ pub struct AuthRequest {
 #[inline]
 fn default_scope() -> String {
     String::from("openid")
+}
+
+#[inline]
+fn default_response_type() -> String {
+    String::from("code")
 }
 
 #[derive(Serialize, Deserialize, Validate, ToSchema)]
