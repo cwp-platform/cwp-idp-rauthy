@@ -5,7 +5,10 @@
     import Input from '$lib5/form/Input.svelte';
     import LangSelector from '$lib5/LangSelector.svelte';
     import {
+        CLIENT_ID,
         IS_DEV,
+        PKCE_VERIFIER,
+        REDIRECT_URI,
         TPL_AUTH_PROVIDERS,
         TPL_CLIENT_FAVICON_UPDATED,
         TPL_CLIENT_LOGO_UPDATED,
@@ -16,6 +19,7 @@
         TPL_LOGIN_ACTION,
         TPL_ATPROTO_ID,
     } from '$utils/constants.js';
+    import { generateNonce, generatePKCE } from '$utils/pkce';
     import IconHome from '$icons/IconHome.svelte';
     import Main from '$lib5/Main.svelte';
     import ContentCenter from '$lib5/ContentCenter.svelte';
@@ -58,26 +62,33 @@
 
     let authorizeUrl = $derived(IS_DEV ? '/auth/v1/dev/authorize' : '/auth/v1/oidc/authorize');
 
-    let clientId = useParam('client_id').get();
+    // opened without any OIDC client params (`/auth/v1/oidc/authorize`) -> fall back to the
+    // account client flow (like `redirectToLogin`): client `rauthy`, account callback,
+    // freshly generated PKCE + nonce, state `account`.
+    const isDefaultMode = !useParam('client_id').get();
+
+    let clientId = useParam('client_id').get() || CLIENT_ID;
     let clientName = $state('');
     // we can't use undefined to avoid a JSON error in the Template component
     let clientFaviconUpdated = $state(-1);
     let clientLogoUpdated = $state(-1);
     let clientUri = $state(IS_DEV ? '/auth/v1' : '');
-    let redirectUri = useParam('redirect_uri').get();
-    let nonce = useParam('nonce').get();
+    let redirectUri =
+        useParam('redirect_uri').get() ||
+        (typeof window !== 'undefined' ? window.location.origin + REDIRECT_URI : '');
+    let nonce = useParam('nonce').get() || (isDefaultMode ? generateNonce() : undefined);
     let idpHint = useParam('idp_hint').get();
     let scopes = useParam('scope').get()?.split(' ') || [];
 
     let refEmail: undefined | HTMLInputElement = $state();
     let refPassword: undefined | HTMLInputElement = $state();
 
-    let stateParam = useParam('state').get();
+    let stateParam = useParam('state').get() || (isDefaultMode ? 'account' : undefined);
     let stateEncoded = $derived(stateParam ? encodeURIComponent(stateParam) : undefined);
-    let challenge = useParam('code_challenge').get();
-    let challengeMethod: CodeChallengeMethod = useParam(
-        'code_challenge_method',
-    ).get() as CodeChallengeMethod;
+    let challenge = $state(useParam('code_challenge').get());
+    let challengeMethod: CodeChallengeMethod = $state(
+        useParam('code_challenge_method').get() as CodeChallengeMethod,
+    );
     // RFC 8707 resource indicator forwarded into the login request
     let resource = useParam('resource').get();
     let existingMfaUser: undefined | string = $state();
@@ -137,9 +148,19 @@
     let hasAutoLoggedIn = false;
     let showModalUpdate = $state(false);
 
-    onMount(() => {
+    onMount(async () => {
         if (!needsPassword) {
             refEmail?.focus();
+        }
+        // unified page opened without an OIDC client: generate the PKCE challenge
+        // and keep the verifier for the account callback (same as `redirectToLogin`)
+        if (isDefaultMode && !challenge) {
+            const pkce = await generatePKCE();
+            if (pkce) {
+                localStorage.setItem(PKCE_VERIFIER, pkce.verifier);
+                challenge = pkce.challenge;
+                challengeMethod = 'S256';
+            }
         }
     });
 
