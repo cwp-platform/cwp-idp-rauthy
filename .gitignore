@@ -24,3 +24,5 @@ heaptrack.*
 static
 templates/html
 gen-config.toml
+
+**/*.log
