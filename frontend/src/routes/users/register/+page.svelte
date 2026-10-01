@@ -26,6 +26,7 @@
     } from '$utils/patterns';
     import type { NewUserRegistrationRequest } from '$api/types/register.ts';
     import { fetchGet, fetchPost } from '$api/fetch';
+    import type { RequestResetRequest } from '$api/types/authorize';
     import type { ConsentDocPublic } from '$api/types/consents';
     import { fetchSolvePow } from '$utils/pow';
     import type { UserValuesConfig } from '$api/templates/UserValuesConfig';
@@ -53,6 +54,9 @@
     let isLoading = $state(false);
     let err = $state('');
     let success = $state(false);
+
+    let resendBusy = $state(false);
+    let resendSent = $state(false);
 
     let usernameExists = $state(false);
 
@@ -246,6 +250,29 @@
 
         isLoading = false;
     }
+
+    /** Re-sends the account activation / set-password magic link for the just
+     *  registered (still unverified, no-password) account. */
+    async function resendEmail() {
+        if (resendBusy) {
+            return;
+        }
+        resendBusy = true;
+        resendSent = false;
+
+        let payload: RequestResetRequest = {
+            email: values.email,
+            pow: (await fetchSolvePow()) || '',
+        };
+        let res = await fetchPost<undefined>('/auth/v1/users/request_reset', payload);
+        if (res.error) {
+            err = res.error.message || 'Error';
+        } else {
+            resendSent = true;
+        }
+
+        resendBusy = false;
+    }
 </script>
 
 <svelte:head>
@@ -405,6 +432,19 @@
                     <div class="success">
                         {t.register.success}<br />
                         {t.register.emailCheck}
+                        {#if resendSent}
+                            <br />
+                            <span class="resendOk">{t.register.emailResent}</span>
+                        {:else}
+                            <button
+                                class="resendBtn"
+                                type="button"
+                                onclick={resendEmail}
+                                disabled={resendBusy}
+                            >
+                                {t.register.emailResend}
+                            </button>
+                        {/if}
                     </div>
                 {:else if err}
                     <div class="err">
@@ -491,6 +531,27 @@
 
     .submit {
         margin-top: 1rem;
+    }
+
+    .resendBtn {
+        margin-top: 0.5rem;
+        padding: 0.25rem 0.5rem;
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: hsl(var(--action));
+        font-size: 0.85rem;
+        text-decoration: underline;
+    }
+
+    .resendBtn:disabled {
+        cursor: wait;
+        color: hsla(var(--text) / 0.6);
+    }
+
+    .resendOk {
+        color: hsl(var(--action));
+        font-size: 0.85rem;
     }
 
     @media (min-width: 35rem) {

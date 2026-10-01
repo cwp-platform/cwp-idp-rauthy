@@ -312,6 +312,8 @@ export const I18nKo: I18n = {
         consentsRequired: '모든 필수 동의를 수락하세요',
         consentsRequiredShort: '필수',
         consentsOptional: '선택 동의',
+        emailResend: '이메일을 받지 못하셨나요? 다시 보내기',
+        emailResent: '이메일을 다시 보냈습니다. 받은편지함을 확인하세요.',
     },
     tos: {
         acceptOptUntil: 'Accept is optional until:',

@@ -330,6 +330,8 @@ export const I18nDe: I18n = {
         consentsRequired: 'Bitte akzeptieren Sie alle erforderlichen Einwilligungen',
         consentsRequiredShort: 'erforderlich',
         consentsOptional: 'Optionale Einwilligungen',
+        emailResend: 'E-Mail nicht erhalten? Erneut senden',
+        emailResent: 'E-Mail erneut gesendet. Prüfen Sie Ihren Posteingang.',
     },
     tos: {
         acceptOptUntil: 'Akzeptieren ist optional bis:',

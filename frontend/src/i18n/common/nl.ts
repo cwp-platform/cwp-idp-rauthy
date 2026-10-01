@@ -323,6 +323,8 @@ export const I18nNl: I18n = {
         consentsRequired: 'Accepteer alle verplichte toestemmingen',
         consentsRequiredShort: 'verplicht',
         consentsOptional: 'Optionele toestemmingen',
+        emailResend: 'E-mail niet ontvangen? Opnieuw verzenden',
+        emailResent: 'E-mail opnieuw verzonden. Controleer uw inbox.',
     },
     tos: {
         acceptOptUntil: 'Accepteren is optioneel tot:',

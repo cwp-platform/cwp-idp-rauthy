@@ -321,6 +321,8 @@ export const I18nRu: I18n = {
         consentsRequired: 'Необходимо принять все обязательные согласия',
         consentsRequiredShort: 'обязательно',
         consentsOptional: 'Добровольные согласия',
+        emailResend: 'Не получили письмо? Отправить повторно',
+        emailResent: 'Письмо отправлено повторно. Проверьте почту.',
     },
     tos: {
         acceptOptUntil: 'Принятие необязательно до:',

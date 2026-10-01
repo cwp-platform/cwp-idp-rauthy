@@ -327,6 +327,8 @@ export const I18nFr: I18n = {
         consentsRequired: 'Veuillez accepter tous les consentements requis',
         consentsRequiredShort: 'requis',
         consentsOptional: 'Consentements facultatifs',
+        emailResend: "Vous n'avez pas reçu l'e-mail ? Renvoyer",
+        emailResent: 'E-mail renvoyé. Vérifiez votre boîte de réception.',
     },
     tos: {
         acceptOptUntil: `Accepter est facultatif jusqu'à :`,
