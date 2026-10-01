@@ -89,12 +89,8 @@ pub async fn get_authorize(
         // freshly generated PKCE challenge when submitting the login form.
         (Client::find(String::from("rauthy")).await?, None)
     } else {
-        let client_id: &str = params.client_id.as_ref().unwrap().as_str();
-        let redirect_uri: &str = params
-            .redirect_uri
-            .as_ref()
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        let client_id: &str = params.client_id.as_deref().unwrap();
+        let redirect_uri: &str = params.redirect_uri.as_deref().unwrap_or_default();
         match validation::validate_auth_req_param(
             &req,
             client_id,
