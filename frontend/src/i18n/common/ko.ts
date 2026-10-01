@@ -217,7 +217,7 @@ export const I18nKo: I18n = {
     },
     index: {
         register: '가입',
-        accountLogin: '계정',
+        accountLogin: '로그인',
         adminLogin: '관리',
     },
     logout: {
@@ -269,7 +269,7 @@ export const I18nKo: I18n = {
         notRecent: '최근 비밀번호 제한',
     },
     passwordReset: {
-        accountLogin: '계정 로그인',
+        accountLogin: '로그인',
         badFormat: '잘못된 형식',
         fidoLink: 'https://fidoalliance.org/fido2/?lang=ko',
         generate: '생성',
@@ -314,6 +314,7 @@ export const I18nKo: I18n = {
         consentsOptional: '선택 동의',
         emailResend: '이메일을 받지 못하셨나요? 다시 보내기',
         emailResent: '이메일을 다시 보냈습니다. 받은편지함을 확인하세요.',
+        backToLogin: '로그인으로 돌아가기',
     },
     tos: {
         acceptOptUntil: 'Accept is optional until:',

@@ -5,6 +5,7 @@
     import { useI18n } from '$state/i18n.svelte';
     import Template from '$lib5/Template.svelte';
     import { TPL_ADMIN_BUTTON_HIDE, TPL_IS_REG_OPEN } from '$utils/constants';
+    import { redirectToLogin } from '$utils/helpers';
     import ThemeSwitch from '$lib5/ThemeSwitch.svelte';
     import LangSelector from '$lib5/LangSelector.svelte';
 
@@ -16,10 +17,6 @@
 
     function redirectToAdmin() {
         window.location.href = '/auth/v1/admin';
-    }
-
-    function redirectToAccount() {
-        window.location.href = '/auth/v1/account';
     }
 
     function redirectToReg() {
@@ -37,7 +34,11 @@
 <Main>
     <ContentCenter>
         <div class="btn">
-            <Button ariaLabel={t.index.accountLogin} onclick={redirectToAccount} width={btnWidth}>
+            <Button
+                ariaLabel={t.index.accountLogin}
+                onclick={() => redirectToLogin()}
+                width={btnWidth}
+            >
                 {t.index.accountLogin}
             </Button>
             {#if isRegOpen}

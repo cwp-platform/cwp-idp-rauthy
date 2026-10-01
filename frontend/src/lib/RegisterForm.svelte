@@ -1,0 +1,588 @@
+<script lang="ts">
+    import Button from '$lib5/button/Button.svelte';
+    import {
+        IS_DEV,
+        PKCE_VERIFIER,
+        REDIRECT_URI,
+        TPL_AUTH_PROVIDERS,
+        TPL_RESTRICTED_EMAIL_DOMAIN,
+        TPL_USER_VALUES_CONFIG,
+    } from '$utils/constants';
+    import Input from '$lib5/form/Input.svelte';
+    import { useI18n } from '$state/i18n.svelte';
+    import Template from '$lib5/Template.svelte';
+    import { useParam } from '$state/param.svelte';
+    import Form from '$lib5/form/Form.svelte';
+    import {
+        PATTERN_ALNUM,
+        PATTERN_CITY,
+        PATTERN_PHONE,
+        PATTERN_STREET,
+        PATTERN_USER_NAME,
+    } from '$utils/patterns';
+    import type { NewUserRegistrationRequest } from '$api/types/register.ts';
+    import { fetchGet, fetchPost } from '$api/fetch';
+    import type { RequestResetRequest } from '$api/types/authorize';
+    import type { ConsentDocPublic } from '$api/types/consents';
+    import { fetchSolvePow } from '$utils/pow';
+    import type { UserValuesConfig } from '$api/templates/UserValuesConfig';
+    import InputDateTimeCombo from '$lib/form/InputDateTimeCombo.svelte';
+    import TZSelect from '$lib/TZSelect.svelte';
+    import type { UserValuesRequest } from '$api/types/user';
+    import type { AuthProviderTemplate } from '$api/templates/AuthProvider';
+    import ButtonAuthProvider from '$lib/ButtonAuthProvider.svelte';
+    import { generateNonce, generatePKCE } from '$utils/pkce';
+    import type { ProviderLoginRequest } from '$api/types/auth_provider';
+    import { execProviderLogin } from '$utils/login';
+    import { detectTimezone, genKey, saveCsrfToken } from '$utils/helpers';
+    import type { SessionInfoResponse } from '$api/types/session';
+    import ConsentCheckboxes from '$lib/ConsentCheckboxes.svelte';
+
+    let {
+        redirectUri = $bindable(),
+        embedded = false,
+        onBackToLogin,
+    }: {
+        redirectUri?: string;
+        embedded?: boolean;
+        onBackToLogin?: () => void;
+    } = $props();
+
+    let t = useI18n();
+
+    let refEmail: undefined | HTMLInputElement = $state();
+
+    let restrictedDomain = $state('');
+    let config: undefined | UserValuesConfig = $state();
+    let redirectFromUrl = useParam('redirect_uri');
+    let providers: AuthProviderTemplate[] = $state([]);
+
+    let isLoading = $state(false);
+    let err = $state('');
+    let success = $state(false);
+
+    let resendBusy = $state(false);
+    let resendSent = $state(false);
+
+    let usernameExists = $state(false);
+
+    let consents: ConsentDocPublic[] = $state([]);
+    let accepted: Record<string, boolean> = $state({});
+    let allRequiredChecked = $derived(consents.filter(c => c.required).every(c => accepted[c.id]));
+
+    // explicit prop (authorize tab) wins over the `?redirect_uri` URL param (standalone page)
+    let effectiveRedirect = $derived(
+        redirectUri !== undefined ? redirectUri : redirectFromUrl.get() || '',
+    );
+
+    $effect(() => {
+        fetchConsents();
+    });
+
+    async function fetchConsents() {
+        let res = await fetchGet<ConsentDocPublic[]>('/auth/v1/consents/public');
+        if (res.body) {
+            consents = res.body;
+        }
+    }
+
+    let values: NewUserRegistrationRequest = $state({
+        email: '',
+        pow: '',
+    });
+    let valuesActive = $state(1);
+
+    let action = $derived(IS_DEV ? '/auth/v1/dev/register' : '/auth/v1/users/register');
+
+    $effect(() => {
+        refEmail?.focus();
+    });
+
+    $effect(() => {
+        if (config) {
+            let active = 1;
+
+            if (config.preferred_username.preferred_username === 'required') {
+                values.preferred_username = '';
+                active += 1;
+            }
+            if (config.given_name === 'required') {
+                values.given_name = '';
+                active += 1;
+            }
+            if (config.family_name === 'required') {
+                values.family_name = '';
+                active += 1;
+            }
+
+            let uv: UserValuesRequest = {};
+            if (config.birthdate === 'required') {
+                uv.birthdate = '';
+                active += 1;
+            }
+            if (config.tz !== 'hidden') {
+                uv.tz = detectTimezone();
+                active += 1;
+            }
+            if (config.street === 'required') {
+                uv.street = '';
+                active += 1;
+            }
+            if (config.zip === 'required') {
+                uv.zip = '';
+                active += 1;
+            }
+            if (config.city === 'required') {
+                uv.city = '';
+                active += 1;
+            }
+            if (config.country === 'required') {
+                uv.country = '';
+                active += 1;
+            }
+            if (config.phone === 'required') {
+                uv.phone = '';
+                active += 1;
+            }
+
+            for (let v of Object.keys(uv)) {
+                if (v !== undefined) {
+                    values.user_values = uv;
+                    break;
+                }
+            }
+
+            valuesActive = active;
+        }
+    });
+
+    async function createSession() {
+        let res = await fetchPost<SessionInfoResponse>('/auth/v1/oidc/session');
+        if (res.status === 200) {
+            // noop - 200 means we already have a valid session
+        } else if (res.body?.csrf_token) {
+            saveCsrfToken(res.body.csrf_token);
+        } else {
+            console.error(res.error);
+        }
+    }
+
+    async function providerLogin(id: string) {
+        let pkce = await generatePKCE();
+        if (!pkce) {
+            return;
+        }
+
+        // PKCE + nonce for the account login AFTER the provider login succeeds
+        localStorage.setItem(PKCE_VERIFIER, pkce.verifier);
+        // If we were able to generate PKCE, nonce generation will always succeed as well.
+        // `genKey()` is just a fallback to make TS happy.
+        let nonce = generateNonce() || genKey(64);
+        const redirect_uri = `${window.location.origin}${REDIRECT_URI}`;
+
+        isLoading = true;
+
+        let payload: ProviderLoginRequest = {
+            email: undefined,
+            client_id: 'rauthy',
+            redirect_uri,
+            scopes: ['openid', 'profile', 'email'],
+            state: 'account',
+            nonce,
+            code_challenge: pkce.challenge,
+            code_challenge_method: 'S256',
+            provider_id: id,
+            pkce_challenge: '',
+            pow: '',
+        };
+
+        // provider login will fail without a session in at least init state
+        await createSession();
+
+        let errMsg = await execProviderLogin(payload);
+        err = errMsg || '';
+        isLoading = false;
+    }
+
+    async function onSubmit(form: HTMLFormElement, params: URLSearchParams) {
+        success = false;
+        err = '';
+
+        if (!values.email) {
+            return;
+        }
+
+        if (restrictedDomain && !values.email.endsWith(restrictedDomain)) {
+            err = t.register.domainErr;
+            return;
+        }
+
+        for (let c of consents) {
+            if (c.required && !accepted[c.id]) {
+                err = t.register.consentsRequired;
+                return;
+            }
+        }
+
+        await submitRegistration();
+    }
+
+    async function submitRegistration() {
+        isLoading = true;
+
+        values.consents = Object.entries(accepted)
+            .filter(([, v]) => v)
+            .map(([id]) => id);
+
+        values.pow = (await fetchSolvePow()) || '';
+        values.redirect_uri = effectiveRedirect;
+
+        const res = await fetchPost(action, values);
+        if (res.error) {
+            let error = res.error.message || 'Error';
+            if (error.includes('UNIQUE constraint')) {
+                if (error.includes('email')) {
+                    err = t.register.alreadyRegisteredEmail;
+                } else {
+                    err = t.register.alreadyRegisteredUsername;
+                }
+            } else {
+                err = error;
+            }
+        } else {
+            err = '';
+            success = true;
+            if (effectiveRedirect) {
+                setTimeout(() => {
+                    window.location.replace(values.redirect_uri || '/auth/v1/account');
+                }, 3000);
+            }
+        }
+
+        isLoading = false;
+    }
+
+    /** Re-sends the account activation / set-password magic link for the just
+     *  registered (still unverified, no-password) account. */
+    async function resendEmail() {
+        if (resendBusy) {
+            return;
+        }
+        resendBusy = true;
+        resendSent = false;
+
+        let payload: RequestResetRequest = {
+            email: values.email,
+            pow: (await fetchSolvePow()) || '',
+        };
+        let res = await fetchPost<undefined>('/auth/v1/users/request_reset', payload);
+        if (res.error) {
+            err = res.error.message || 'Error';
+        } else {
+            resendSent = true;
+        }
+
+        resendBusy = false;
+    }
+</script>
+
+<Template id={TPL_RESTRICTED_EMAIL_DOMAIN} bind:value={restrictedDomain} />
+<Template id={TPL_USER_VALUES_CONFIG} bind:value={config} />
+<Template id={TPL_AUTH_PROVIDERS} bind:value={providers} />
+
+<div class:container={!embedded}>
+    {#if !embedded}
+        <div class="domainTxt">
+            <h1>{t.register.userReg}</h1>
+            {#if restrictedDomain}
+                {t.register.domainRestricted}<br />
+                {t.register.domainAllowed} <code>@{restrictedDomain}</code>
+            {/if}
+        </div>
+    {:else if restrictedDomain}
+        <div class="domainTxt">
+            {t.register.domainRestricted}<br />
+            {t.register.domainAllowed} <code>@{restrictedDomain}</code>
+        </div>
+    {/if}
+
+    <Form {action} {onSubmit}>
+        <div class={valuesActive > 5 ? 'valuesMany' : ''}>
+            <Input
+                bind:ref={refEmail}
+                typ="email"
+                name="email"
+                autocomplete="email"
+                label={t.common.email}
+                placeholder={t.common.email}
+                bind:value={values.email}
+                required
+            />
+            {#if values.preferred_username !== undefined}
+                <Input
+                    name="preferred_username"
+                    autocomplete="off"
+                    label={t.account.preferredUsername.preferredUsername}
+                    placeholder={t.account.preferredUsername.preferredUsername}
+                    bind:value={values.preferred_username}
+                    required
+                    isError={usernameExists}
+                    errMsg={usernameExists
+                        ? t.account.preferredUsername.notAvailable
+                        : config?.preferred_username.pattern_hint}
+                    pattern={config?.preferred_username.pattern_html}
+                    onInput={() => (usernameExists = false)}
+                />
+            {/if}
+            {#if values.given_name !== undefined}
+                <Input
+                    name="given_name"
+                    autocomplete="given-name"
+                    label={t.account.givenName}
+                    placeholder={t.account.givenName}
+                    bind:value={values.given_name}
+                    pattern={PATTERN_USER_NAME}
+                    required
+                />
+            {/if}
+            {#if values.family_name !== undefined}
+                <Input
+                    name="family_name"
+                    autocomplete="family-name"
+                    label={t.account.familyName}
+                    placeholder={t.account.familyName}
+                    bind:value={values.family_name}
+                    pattern={PATTERN_USER_NAME}
+                    required
+                />
+            {/if}
+            {#if values.user_values?.birthdate !== undefined}
+                <InputDateTimeCombo
+                    name="birthdate"
+                    label={t.account.birthdate}
+                    bind:value={values.user_values.birthdate}
+                    required
+                    withDelete
+                />
+            {/if}
+            {#if values.user_values?.tz !== undefined && values.user_values?.tz != null}
+                <TZSelect bind:value={values.user_values.tz} />
+            {/if}
+
+            {#if values.user_values?.street !== undefined}
+                <Input
+                    name="street"
+                    autocomplete="street-address"
+                    label={t.account.street}
+                    placeholder={t.account.street}
+                    bind:value={values.user_values.street}
+                    required
+                    maxLength={48}
+                    pattern={PATTERN_STREET}
+                />
+            {/if}
+            {#if values.user_values?.zip !== undefined}
+                <Input
+                    name="zip"
+                    autocomplete="postal-code"
+                    label={t.account.zip}
+                    placeholder={t.account.zip}
+                    bind:value={values.user_values.zip}
+                    required
+                    maxLength={24}
+                    pattern={PATTERN_ALNUM}
+                />
+            {/if}
+            {#if values.user_values?.city !== undefined}
+                <Input
+                    name="city"
+                    autocomplete="address-level2"
+                    label={t.account.city}
+                    placeholder={t.account.city}
+                    bind:value={values.user_values.city}
+                    required
+                    maxLength={48}
+                    pattern={PATTERN_CITY}
+                />
+            {/if}
+            {#if values.user_values?.country !== undefined}
+                <Input
+                    name="country"
+                    autocomplete="country"
+                    label={t.account.country}
+                    placeholder={t.account.country}
+                    bind:value={values.user_values.country}
+                    required
+                    maxLength={48}
+                    pattern={PATTERN_CITY}
+                />
+            {/if}
+            {#if values.user_values?.phone !== undefined}
+                <Input
+                    name="phone"
+                    autocomplete="tel"
+                    label={t.account.phone}
+                    placeholder={t.account.phone}
+                    bind:value={values.user_values.phone}
+                    required
+                    maxLength={32}
+                    pattern={PATTERN_PHONE}
+                />
+            {/if}
+        </div>
+
+        {#if consents.length > 0}
+            <ConsentCheckboxes {consents} bind:accepted />
+        {/if}
+
+        <div class="submit">
+            <Button type="submit" isDisabled={!allRequiredChecked} {isLoading}
+                >{t.register.register}</Button
+            >
+        </div>
+        {#if success}
+            <div class="success">
+                {t.register.success}<br />
+                {t.register.emailCheck}
+                {#if resendSent}
+                    <br />
+                    <span class="resendOk">{t.register.emailResent}</span>
+                {:else}
+                    <button
+                        class="resendBtn"
+                        type="button"
+                        onclick={resendEmail}
+                        disabled={resendBusy}
+                    >
+                        {t.register.emailResend}
+                    </button>
+                {/if}
+            </div>
+        {:else if err}
+            <div class="err">
+                {err}
+            </div>
+        {/if}
+
+        {#if providers.length > 0}
+            <div class="providers flex-col gap-05">
+                <div class="providersSeparator">
+                    <div class="separator"></div>
+                    <div class="registerWith">
+                        <div>
+                            {t.register.orRegisterWith}
+                        </div>
+                    </div>
+                </div>
+                {#each providers as provider}
+                    <ButtonAuthProvider
+                        ariaLabel={`${t.register.orRegisterWith}: ${provider.name}`}
+                        {provider}
+                        onclick={() => providerLogin(provider.id)}
+                        {isLoading}
+                    />
+                {/each}
+            </div>
+        {/if}
+    </Form>
+
+    {#if onBackToLogin}
+        <button class="backToLogin" type="button" onclick={onBackToLogin}>
+            {t.register.backToLogin}
+        </button>
+    {/if}
+</div>
+
+<style>
+    .container {
+        padding: 1rem;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        border-radius: var(--border-radius);
+        background: hsla(var(--bg-high) / 0.25);
+    }
+
+    .err {
+        max-width: 16rem;
+    }
+
+    .err,
+    .success {
+        margin-top: 0.5rem;
+    }
+
+    .domainTxt {
+        margin: 0.5rem 0;
+    }
+
+    .providers {
+        margin-top: 1rem;
+    }
+
+    .providersSeparator {
+        margin-top: 1rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .registerWith {
+        display: flex;
+        justify-content: center;
+        margin-top: -0.9rem;
+    }
+
+    .registerWith > div {
+        padding: 0 0.5rem;
+        font-size: 0.8rem;
+        color: hsla(var(--text) / 0.6);
+    }
+
+    .separator {
+        height: 1px;
+        background: hsla(var(--bg-high) / 0.8);
+    }
+
+    .submit {
+        margin-top: 1rem;
+    }
+
+    .backToLogin {
+        margin-top: 0.75rem;
+        padding: 0.25rem 0.5rem;
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: hsl(var(--action));
+        font-size: 0.85rem;
+        text-decoration: underline;
+    }
+
+    .resendBtn {
+        margin-top: 0.5rem;
+        padding: 0.25rem 0.5rem;
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: hsl(var(--action));
+        font-size: 0.85rem;
+        text-decoration: underline;
+    }
+
+    .resendBtn:disabled {
+        cursor: wait;
+        color: hsla(var(--text) / 0.6);
+    }
+
+    .resendOk {
+        color: hsl(var(--action));
+        font-size: 0.85rem;
+    }
+
+    @media (min-width: 35rem) {
+        .valuesMany {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            column-gap: 1.5rem;
+        }
+    }
+</style>
