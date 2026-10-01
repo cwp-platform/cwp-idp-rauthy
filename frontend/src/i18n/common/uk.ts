@@ -327,6 +327,8 @@ export const I18nUk: I18n = {
         consentsRequired: "Необхідно прийняти всі обов'язкові згоди",
         consentsRequiredShort: "обов'язково",
         consentsOptional: 'Добровільні згоди',
+        emailResend: 'Не отримали лист? Надіслати повторно',
+        emailResent: 'Лист надіслано повторно. Перевірте пошту.',
     },
     tos: {
         acceptOptUntil: "Прийняття необов'язкове до:",

@@ -321,6 +321,8 @@ export const I18nEn: I18n = {
         consentsRequired: 'Please accept all required consents',
         consentsRequiredShort: 'required',
         consentsOptional: 'Optional consents',
+        emailResend: "Didn't receive the email? Resend",
+        emailResent: 'Email sent again. Check your inbox.',
     },
     tos: {
         acceptOptUntil: 'Accept is optional until:',

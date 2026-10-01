@@ -275,6 +275,8 @@ export interface I18n {
         consentsRequired: string;
         consentsRequiredShort: string;
         consentsOptional: string;
+        emailResend: string;
+        emailResent: string;
     };
     tos: {
         acceptOptUntil: string;

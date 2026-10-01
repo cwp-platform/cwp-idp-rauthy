@@ -303,6 +303,8 @@ export const I18nZh: I18n = {
         consentsRequired: '请接受所有必填同意',
         consentsRequiredShort: '必填',
         consentsOptional: '可选同意',
+        emailResend: '没有收到邮件？重新发送',
+        emailResent: '邮件已重新发送。请检查收件箱。',
     },
     tos: {
         acceptOptUntil: '接受是可选的直到：',

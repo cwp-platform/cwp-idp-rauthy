@@ -318,6 +318,8 @@ export const I18nNb: I18n = {
         consentsRequired: 'Vennligst godta alle obligatoriske samtykker',
         consentsRequiredShort: 'obligatorisk',
         consentsOptional: 'Valgfrie samtykker',
+        emailResend: 'Fikk du ikke e-posten? Send på nytt',
+        emailResent: 'E-post sendt på nytt. Sjekk innboksen.',
     },
     tos: {
         acceptOptUntil: 'Accept is optional until:',
