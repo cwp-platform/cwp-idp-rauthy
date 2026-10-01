@@ -209,7 +209,7 @@ export const I18nZh: I18n = {
     },
     index: {
         register: '注册',
-        accountLogin: '账户登录',
+        accountLogin: '登录',
         adminLogin: '管理员登录',
     },
     logout: {
@@ -259,7 +259,7 @@ export const I18nZh: I18n = {
         notRecent: '不是最近使用过的密码之一',
     },
     passwordReset: {
-        accountLogin: '账户登录',
+        accountLogin: '登录',
         badFormat: '格式错误',
         fidoLink: 'https://fidoalliance.org/fido2/?lang=zh-hans',
         generate: '生成',
@@ -305,6 +305,7 @@ export const I18nZh: I18n = {
         consentsOptional: '可选同意',
         emailResend: '没有收到邮件？重新发送',
         emailResent: '邮件已重新发送。请检查收件箱。',
+        backToLogin: '返回登录',
     },
     tos: {
         acceptOptUntil: '接受是可选的直到：',

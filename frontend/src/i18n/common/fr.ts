@@ -226,7 +226,7 @@ export const I18nFr: I18n = {
     },
     index: {
         register: `S'inscrire`,
-        accountLogin: 'Compte',
+        accountLogin: 'Connexion',
         adminLogin: 'Administrateur',
     },
     logout: {
@@ -280,7 +280,7 @@ export const I18nFr: I18n = {
         notRecent: 'Ce n’est pas l’un des derniers mots de passe récents',
     },
     passwordReset: {
-        accountLogin: 'Connexion au compte',
+        accountLogin: 'Connexion',
         badFormat: 'Mauvais format',
         fidoLink: 'https://fidoalliance.org/fido2',
         generate: 'Générer',
@@ -329,6 +329,7 @@ export const I18nFr: I18n = {
         consentsOptional: 'Consentements facultatifs',
         emailResend: "Vous n'avez pas reçu l'e-mail ? Renvoyer",
         emailResent: 'E-mail renvoyé. Vérifiez votre boîte de réception.',
+        backToLogin: 'Retour à la connexion',
     },
     tos: {
         acceptOptUntil: `Accepter est facultatif jusqu'à :`,

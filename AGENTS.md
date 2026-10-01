@@ -45,8 +45,8 @@
 | `frontend/src/api/types/consents.ts` | TS-типы консентов | Нет (новый файл) |
 
 **Ограниченный набор правок общих файлов (единственная поверхность конфликта):**
-`src/api/src/users.rs`, `src/api_types/src/users.rs`, `src/service/src/oidc/authorize.rs`,
-`src/bin/src/server.rs`, `src/{api,service,bin}/Cargo.toml`,
+`src/api/src/users.rs`, `src/api/src/oidc.rs`, `src/api_types/src/users.rs`,
+`src/service/src/oidc/authorize.rs`, `src/bin/src/server.rs`, `src/{api,service,bin}/Cargo.toml`,
 `frontend/src/routes/users/register/+page.svelte`,
 `frontend/src/routes/oidc/authorize/+page.svelte`,
 `frontend/src/routes/admin/config/+layout.svelte`,

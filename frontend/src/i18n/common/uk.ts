@@ -228,7 +228,7 @@ export const I18nUk: I18n = {
     },
     index: {
         register: 'Реєстрація',
-        accountLogin: 'Акаунт',
+        accountLogin: 'Вход',
         adminLogin: 'Адмін',
     },
     logout: {
@@ -281,7 +281,7 @@ export const I18nUk: I18n = {
         notRecent: 'Не повинен бути одним з останніх паролів',
     },
     passwordReset: {
-        accountLogin: 'Вхід в акаунт',
+        accountLogin: 'Вход',
         badFormat: 'Неправильний формат',
         fidoLink: 'https://fidoalliance.org/fido2',
         generate: 'Згенерувати',
@@ -329,6 +329,7 @@ export const I18nUk: I18n = {
         consentsOptional: 'Добровільні згоди',
         emailResend: 'Не отримали лист? Надіслати повторно',
         emailResent: 'Лист надіслано повторно. Перевірте пошту.',
+        backToLogin: 'Назад до входу',
     },
     tos: {
         acceptOptUntil: "Прийняття необов'язкове до:",

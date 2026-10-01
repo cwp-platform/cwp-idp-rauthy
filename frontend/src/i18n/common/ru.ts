@@ -222,7 +222,7 @@ export const I18nRu: I18n = {
     },
     index: {
         register: 'Регистрация',
-        accountLogin: 'Учётная запись',
+        accountLogin: 'Вход',
         adminLogin: 'Администратор',
     },
     logout: {
@@ -276,7 +276,7 @@ export const I18nRu: I18n = {
         notRecent: 'Не один из последних использованных паролей',
     },
     passwordReset: {
-        accountLogin: 'Вход в учётную запись',
+        accountLogin: 'Вход',
         badFormat: 'Неверный формат',
         fidoLink: 'https://fidoalliance.org/fido2',
         generate: 'Сгенерировать',
@@ -323,6 +323,7 @@ export const I18nRu: I18n = {
         consentsOptional: 'Добровольные согласия',
         emailResend: 'Не получили письмо? Отправить повторно',
         emailResent: 'Письмо отправлено повторно. Проверьте почту.',
+        backToLogin: 'Назад ко входу',
     },
     tos: {
         acceptOptUntil: 'Принятие необязательно до:',

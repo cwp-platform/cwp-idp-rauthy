@@ -224,7 +224,7 @@ export const I18nNl: I18n = {
     },
     index: {
         register: 'Registreren',
-        accountLogin: 'Account',
+        accountLogin: 'Inloggen',
         adminLogin: 'Beheerder',
     },
     logout: {
@@ -278,7 +278,7 @@ export const I18nNl: I18n = {
         notRecent: 'Niet één van de recente wachtwoorden',
     },
     passwordReset: {
-        accountLogin: 'Account inloggen',
+        accountLogin: 'Inloggen',
         badFormat: 'Ongeldig formaat',
         fidoLink: 'https://fidoalliance.org/fido2',
         generate: 'Genereren',
@@ -325,6 +325,7 @@ export const I18nNl: I18n = {
         consentsOptional: 'Optionele toestemmingen',
         emailResend: 'E-mail niet ontvangen? Opnieuw verzenden',
         emailResent: 'E-mail opnieuw verzonden. Controleer uw inbox.',
+        backToLogin: 'Terug naar inloggen',
     },
     tos: {
         acceptOptUntil: 'Accepteren is optioneel tot:',

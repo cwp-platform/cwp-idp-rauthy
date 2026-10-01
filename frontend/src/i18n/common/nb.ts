@@ -219,7 +219,7 @@ export const I18nNb: I18n = {
     },
     index: {
         register: 'Registrer',
-        accountLogin: 'Konto',
+        accountLogin: 'Logg inn',
         adminLogin: 'Admin',
     },
     logout: {
@@ -273,7 +273,7 @@ export const I18nNb: I18n = {
         notRecent: 'Ikke noe av de siste passordene',
     },
     passwordReset: {
-        accountLogin: 'Konto pålogging',
+        accountLogin: 'Logg inn',
         badFormat: 'Ugyldig format',
         fidoLink: 'https://fidoalliance.org/fido2',
         generate: 'Generer',
@@ -320,6 +320,7 @@ export const I18nNb: I18n = {
         consentsOptional: 'Valgfrie samtykker',
         emailResend: 'Fikk du ikke e-posten? Send på nytt',
         emailResent: 'E-post sendt på nytt. Sjekk innboksen.',
+        backToLogin: 'Tilbake til innlogging',
     },
     tos: {
         acceptOptUntil: 'Accept is optional until:',
