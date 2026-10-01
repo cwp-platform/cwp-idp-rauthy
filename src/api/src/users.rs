@@ -452,7 +452,10 @@ pub async fn post_users_register_handle(
     {
         let mut allow = false;
         for uri in Client::find_all_client_uris().await? {
-            if uri.starts_with(redirect_uri) {
+            // redirect_uri (OIDC callback, напр. https://host/auth/callback) должен
+            // лежать на домене клиента (client_uri https://host). Обратное сравнение
+            // (uri.starts_with(redirect_uri)) ломало регистрацию с полным callback'ом.
+            if redirect_uri.starts_with(&uri) {
                 allow = true;
                 break;
             }
