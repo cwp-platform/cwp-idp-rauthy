@@ -1,0 +1,76 @@
+# CI cwp-idp-rauthy: push v* → сборка образа (rauthy-builder, UI с консентами 152-ФЗ) → Yandex CR + тег.
+# Сборка — GitHub Actions (не вручную). Образ = форк cwp-idp-rauthy, UI из assets/static_html.
+
+name: ci
+
+on:
+  push:
+    branches: ['v*']
+  workflow_dispatch:
+
+env:
+  CWP_GH_BASE: "git@github.com:${{ github.repository_owner }}"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup ssh-agent (deploy key для приватных репо)
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.CWPP_SPECS_DEPLOY_KEY }}
+
+      - name: Resolve image version
+        id: version
+        run: |
+          git fetch --tags
+          REF="${GITHUB_REF#refs/heads/}"
+          MM="${REF#v}"
+          MM="$(echo "$MM" | awk -F. '{printf "%d.%d", $1, $2}')"
+          LAST=$(git tag --list "${MM}.*" --sort=-v:refname | head -1)
+          if [ -z "$LAST" ]; then NEXT="${MM}.0"
+          else NEXT=$(echo "$LAST" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}'); fi
+          echo "version=${NEXT}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract UI archive (консенты 152-ФЗ)
+        run: |
+          tar -xf assets/static_html/static_v1.tar.gz
+          tar -xf assets/static_html/templates_html.tar.gz
+          mkdir -p out/empty
+
+      - name: Build rauthy binary (rauthy-builder, x86_64)
+        run: |
+          docker run --rm -v "$(pwd):/work" -w /work \
+            -e CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+            -e PKG_CONFIG_ALLOW_CROSS=1 \
+            ghcr.io/sebadob/rauthy-builder:20260519 \
+            cargo build --release --target x86_64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-gnu/release/rauthy out/rauthy_amd64
+
+      - name: Build image
+        run: |
+          docker build --build-arg VERSION="${{ steps.version.outputs.version }}" \
+            -t "${{ vars.CWPP_REGISTRY_PREF }}/cwp-idp-rauthy:${{ steps.version.outputs.version }}" \
+            -f Dockerfile .
+
+      - name: Push to Yandex CR
+        run: |
+          echo "$REG_PASS" | docker login --username "$REG_USER" --password-stdin "${{ vars.CWPP_REGISTRY_HOST }}"
+          docker push "${{ vars.CWPP_REGISTRY_PREF }}/cwp-idp-rauthy:${{ steps.version.outputs.version }}"
+        env:
+          REG_USER: ${{ secrets.CWPP_REGISTRY_USER }}
+          REG_PASS: ${{ secrets.CWPP_REGISTRY_PASS }}
+
+      - name: Tag release
+        run: |
+          git config user.name "cwp-ci"
+          git config user.email "ci@cwp.local"
+          git tag "${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.version }}"
