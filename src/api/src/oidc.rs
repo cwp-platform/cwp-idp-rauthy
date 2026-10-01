@@ -83,26 +83,39 @@ pub async fn get_authorize(
     let principal = principal.into_inner();
     let lang = Language::try_from(&req).unwrap_or_default();
 
-    let (client, origin_header) = match validation::validate_auth_req_param(
-        &req,
-        &params.client_id,
-        &params.redirect_uri,
-        &params.code_challenge,
-        &params.code_challenge_method,
-    )
-    .await
-    {
-        Ok(res) => res,
-        Err(err) => {
-            error!("Client used invalid request parameters: {:?}", err.message);
-            let status = err.status_code();
-            let body = Error1Html::build(
-                &lang,
-                ThemeCssFull::find_theme_ts_rauthy().await?,
-                status,
-                err.message,
-            );
-            return Ok(ErrorHtml::response(body, status));
+    let (client, origin_header) = if params.client_id.is_none() {
+        // No OIDC client given -> serve the unified login/register page bound to the
+        // account client (`rauthy`). The frontend supplies client_id, redirect_uri and a
+        // freshly generated PKCE challenge when submitting the login form.
+        (Client::find(String::from("rauthy")).await?, None)
+    } else {
+        let client_id: &str = params.client_id.as_ref().unwrap().as_str();
+        let redirect_uri: &str = params
+            .redirect_uri
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        match validation::validate_auth_req_param(
+            &req,
+            client_id,
+            redirect_uri,
+            &params.code_challenge,
+            &params.code_challenge_method,
+        )
+        .await
+        {
+            Ok(res) => res,
+            Err(err) => {
+                error!("Client used invalid request parameters: {:?}", err.message);
+                let status = err.status_code();
+                let body = Error1Html::build(
+                    &lang,
+                    ThemeCssFull::find_theme_ts_rauthy().await?,
+                    status,
+                    err.message,
+                );
+                return Ok(ErrorHtml::response(body, status));
+            }
         }
     };
     let theme_ts = ThemeCssFull::find_theme_ts(client.id.clone()).await?;
@@ -150,7 +163,7 @@ pub async fn get_authorize(
             .unwrap_or(false)
         && principal.validate_session_auth().is_err()
     {
-        let mut loc = params.redirect_uri;
+        let mut loc = params.redirect_uri.unwrap_or_default();
         let state_len = params.state.as_ref().map(|s| 7 + s.len()).unwrap_or(0);
         loc.reserve(1 + 20 + state_len);
 
