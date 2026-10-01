@@ -844,7 +844,7 @@
                     {#snippet register()}
                         <RegisterForm
                             embedded
-                            redirectUri={clientUri || ''}
+                            redirectUri={redirectUri || clientUri || ''}
                             onBackToLogin={() => switchTab('login')}
                         />
                     {/snippet}
