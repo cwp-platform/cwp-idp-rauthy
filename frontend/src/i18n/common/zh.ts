@@ -302,6 +302,7 @@ export const I18nZh: I18n = {
         consentsOpen: '打开文档',
         consentsRequired: '请接受所有必填同意',
         consentsRequiredShort: '必填',
+        consentsOptional: '可选同意',
     },
     tos: {
         acceptOptUntil: '接受是可选的直到：',

@@ -37,7 +37,7 @@
     import { generateNonce, generatePKCE } from '$utils/pkce';
     import type { ProviderLoginRequest } from '$api/types/auth_provider';
     import { execProviderLogin } from '$utils/login';
-    import { genKey, saveCsrfToken } from '$utils/helpers';
+    import { detectTimezone, genKey, saveCsrfToken } from '$utils/helpers';
     import type { SessionInfoResponse } from '$api/types/session';
     import ConsentCheckboxes from '$lib/ConsentCheckboxes.svelte';
 
@@ -58,6 +58,7 @@
 
     let consents: ConsentDocPublic[] = $state([]);
     let accepted: Record<string, boolean> = $state({});
+    let allRequiredChecked = $derived(consents.filter(c => c.required).every(c => accepted[c.id]));
 
     $effect(() => {
         fetchConsents();
@@ -105,7 +106,7 @@
                 active += 1;
             }
             if (config.tz !== 'hidden') {
-                uv.tz = 'UTC';
+                uv.tz = detectTimezone();
                 active += 1;
             }
             if (config.street === 'required') {
@@ -396,7 +397,9 @@
                 {/if}
 
                 <div class="submit">
-                    <Button type="submit" {isLoading}>{t.register.register}</Button>
+                    <Button type="submit" isDisabled={!allRequiredChecked} {isLoading}
+                        >{t.register.register}</Button
+                    >
                 </div>
                 {#if success}
                     <div class="success">

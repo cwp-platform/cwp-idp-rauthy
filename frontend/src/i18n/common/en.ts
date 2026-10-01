@@ -320,6 +320,7 @@ export const I18nEn: I18n = {
         consentsOpen: 'Open document',
         consentsRequired: 'Please accept all required consents',
         consentsRequiredShort: 'required',
+        consentsOptional: 'Optional consents',
     },
     tos: {
         acceptOptUntil: 'Accept is optional until:',

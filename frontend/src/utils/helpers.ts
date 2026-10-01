@@ -314,6 +314,16 @@ export function prettyFileSize(size: number) {
     }
 }
 
+/** Best-effort browser timezone detection (e.g. "Europe/Berlin"); falls back to "UTC". */
+export function detectTimezone(): string {
+    try {
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        return tz && tz !== 'Etc/Unknown' ? tz : 'UTC';
+    } catch {
+        return 'UTC';
+    }
+}
+
 export async function fetchTimezones() {
     let res = await fetchGet<string[]>('/auth/v1/timezones');
     if (res.body) {

@@ -326,6 +326,7 @@ export const I18nUk: I18n = {
         consentsOpen: 'Відкрити документ',
         consentsRequired: "Необхідно прийняти всі обов'язкові згоди",
         consentsRequiredShort: "обов'язково",
+        consentsOptional: 'Добровільні згоди',
     },
     tos: {
         acceptOptUntil: "Прийняття необов'язкове до:",

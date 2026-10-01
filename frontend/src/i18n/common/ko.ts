@@ -311,6 +311,7 @@ export const I18nKo: I18n = {
         consentsOpen: '문서 열기',
         consentsRequired: '모든 필수 동의를 수락하세요',
         consentsRequiredShort: '필수',
+        consentsOptional: '선택 동의',
     },
     tos: {
         acceptOptUntil: 'Accept is optional until:',

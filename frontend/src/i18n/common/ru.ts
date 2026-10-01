@@ -320,6 +320,7 @@ export const I18nRu: I18n = {
         consentsOpen: 'Открыть документ',
         consentsRequired: 'Необходимо принять все обязательные согласия',
         consentsRequiredShort: 'обязательно',
+        consentsOptional: 'Добровольные согласия',
     },
     tos: {
         acceptOptUntil: 'Принятие необязательно до:',
