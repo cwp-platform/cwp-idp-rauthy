@@ -274,6 +274,7 @@ export interface I18n {
         consentsOpen: string;
         consentsRequired: string;
         consentsRequiredShort: string;
+        consentsOptional: string;
     };
     tos: {
         acceptOptUntil: string;

@@ -329,6 +329,7 @@ export const I18nDe: I18n = {
         consentsOpen: 'Dokument öffnen',
         consentsRequired: 'Bitte akzeptieren Sie alle erforderlichen Einwilligungen',
         consentsRequiredShort: 'erforderlich',
+        consentsOptional: 'Optionale Einwilligungen',
     },
     tos: {
         acceptOptUntil: 'Akzeptieren ist optional bis:',
