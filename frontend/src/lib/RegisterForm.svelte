@@ -252,11 +252,10 @@
         } else {
             err = '';
             success = true;
-            if (effectiveRedirect) {
-                setTimeout(() => {
-                    window.location.replace(values.redirect_uri || '/auth/v1/account');
-                }, 3000);
-            }
+            // НЕ редиректим на redirect_uri: после регистрации (double opt-in) кода
+            // ещё нет, callback сайта упал бы с «No authorization code». Показываем
+            // состояние «проверьте почту» — после активации пользователь входит
+            // через обычный флоу (authorize → code → callback).
         }
 
         isLoading = false;
