@@ -65,16 +65,17 @@
 3. `v0.2`: merge/rebase на новый `main`. Конфликты возможны ТОЛЬКО в общих файлах из
    §4; `src/rauthy-consents/`, миграции `V90/90` и новые фронтенд-файлы не трогаются.
 4. `cargo check` (перегенерация/разрешение `Cargo.lock`).
-5. Верификация: `just extract-ui-archive`, `just build-wasm`, `cargo check`,
-   `cd frontend && npm install && npm run check`.
+5. Верификация: `just build-wasm`, `cd frontend && npm ci && cd .. && just build-ui`,
+   `cargo check`, `cd frontend && npm run check`.
 6. `t/*` ветки ребейзятся на обновлённый `v0.2`.
 
 ## 6. Команды
 
 - `cargo check` / `cargo build` — бэкенд (весь workspace, включая `rauthy-consents`).
 - `cargo test` / `cargo clippy -- -D warnings` / `cargo fmt --check`.
-- `just extract-ui-archive` — распаковка статичного UI-архива (нужно до `cargo build`).
 - `just build-wasm` — сборка wasm-модулей (`spow`, `md`) — нужна для фронтенда.
+- `just build-ui` — сборка фронтенда в `static/v1` + `templates/html` (нужно до `cargo build`).
+  UI-архив (`assets/static_html/*.tar.gz`) НЕ коммитится (gitignored) — всегда собирается из исходников.
 - `cd frontend && npm install && npm run check` — svelte-check (типы/Svelte).
 - `cd frontend && npm run format-check` — prettier.
 

@@ -329,8 +329,7 @@ archive-ui: build-ui
 
     tar -czf assets/static_html/templates_html.tar.gz templates/html
     tar -czf assets/static_html/static_v1.tar.gz static/v1
-
-    git add assets/static_html/*
+    # NOTE: архив больше не коммитится (gitignored) — только локальный кэш/бэкап.
 
 # extracts archived UI files into target folders
 extract-ui-archive:

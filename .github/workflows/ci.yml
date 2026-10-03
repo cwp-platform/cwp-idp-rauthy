@@ -39,10 +39,12 @@ jobs:
           else NEXT=$(echo "$LAST" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}'); fi
           echo "version=${NEXT}" >> "$GITHUB_OUTPUT"
 
-      - name: Extract UI archive (консенты 152-ФЗ)
+      - name: Build UI from source (консенты 152-ФЗ)
         run: |
-          tar -xf assets/static_html/static_v1.tar.gz
-          tar -xf assets/static_html/templates_html.tar.gz
+          docker run --rm \
+            -v "$(pwd):/work" -w /work \
+            ghcr.io/sebadob/rauthy-builder:20260519 \
+            bash -lc 'just build-wasm && cd frontend && npm install && cd .. && just build-ui'
           mkdir -p out/empty
 
       - name: Cache cargo registry

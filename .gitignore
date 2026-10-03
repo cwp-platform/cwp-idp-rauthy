@@ -24,5 +24,8 @@ heaptrack.*
 static
 templates/html
 gen-config.toml
+# Скомпилированный UI-архив — собирается из исходников при билде (см. ci.yml / just build-ui).
+assets/static_html/
+.cargo-registry-cache/
 
 **/*.log
