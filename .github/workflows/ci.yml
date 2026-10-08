@@ -63,6 +63,16 @@ jobs:
           restore-keys: |
             rauthy-target-x86_64-
 
+      - name: Fetch FIDO MDS dataset (fido-mds-prep, требуется release-сборкой)
+        run: |
+          mkdir -p ~/.cargo-registry
+          docker run --rm \
+            -v ~/.cargo-registry:/usr/local/cargo/registry \
+            -v "$(pwd):/work" -w /work \
+            ghcr.io/sebadob/rauthy-builder:20260519 \
+            bash -c 'export PATH="/usr/local/cargo/bin:$PATH"; just fido-mds-prep'
+          mkdir -p out/empty
+
       - name: Build rauthy binary (rauthy-builder, x86_64)
         run: |
           mkdir -p ~/.cargo-registry
