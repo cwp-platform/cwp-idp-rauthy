@@ -78,7 +78,7 @@
     // we can't use undefined to avoid a JSON error in the Template component
     let clientFaviconUpdated = $state(-1);
     let clientLogoUpdated = $state(-1);
-let clientUri = $state('');
+    let clientUri = $state('');
     let clientUriNormalized = $state('');
     let redirectUri =
         useParam('redirect_uri').get() ||
@@ -157,10 +157,7 @@ let clientUri = $state('');
     let hasAutoLoggedIn = false;
     let showModalUpdate = $state(false);
 
-onMount(async () => {
-        if (!needsPassword) {
-            refEmail?.focus();
-        }
+    onMount(async () => {
         // unified page opened without an OIDC client: generate the PKCE challenge
         // and keep the verifier for the account callback (same as `redirectToLogin`)
         if (isDefaultMode && !challenge) {
@@ -559,7 +556,7 @@ onMount(async () => {
         mfaPurpose = undefined;
     }
 
-/** Before the final redirect, check whether the user must (or may) re-confirm
+    /** Before the final redirect, check whether the user must (or may) re-confirm
      *  changed consent documents (`reconfirm = login`). If yes, show the inline
      *  gate instead of redirecting; on confirm the accepted documents are recorded
      *  and the redirect is resumed. */
@@ -729,66 +726,20 @@ onMount(async () => {
                     to output proper logs in case of misconfiguration.
                     Another approach would be to check this in the backend and emit warning logs.
                     -->
-{#if mfaKind == 'webauthn'}
-                        <WebauthnRequest
-                            purpose={mfaPurpose}
-                            onSuccess={onMfaSuccess}
-                            onError={onMfaError}
-                        />
-                    {:else if mfaKind == 'otp' && activeOtps}
-                        <OtpRequest
-                            {activeOtps}
-                            purpose={mfaPurpose}
-                            onSuccess={onMfaSuccess}
-                            onError={onMfaError}
-                        />
-                    {/if}
-                {/if}
-
-                {#if !clientMfaForce}
-                    <Form action={authorizeUrl} {onSubmit}>
-                        <div class:emailMinHeight={!showPasswordInput}>
-                            {#if isAtproto}
-                                <Input
-                                    name="handle"
-                                    bind:value={atprotoHandle}
-                                    label="Handle / DID"
-                                    placeholder="Handle / DID"
-                                    pattern={PATTERN_ATPROTO_ID}
-                                    disabled={tooManyRequests}
-                                    width={inputWidth}
-                                    required
+                            {#if mfaKind == 'webauthn'}
+                                <WebauthnRequest
+                                    purpose={mfaPurpose}
+                                    onSuccess={onMfaSuccess}
+                                    onError={onMfaError}
                                 />
-                            {:else}
-                                <Input
-                                    typ="email"
-                                    name="email"
-                                    bind:value={email}
-                                    autocomplete="email"
-                                    label={t.common.email}
-                                    placeholder={t.common.email}
-                                    errMsg={t.authorize.validEmail}
-                                    disabled={tooManyRequests || clientMfaForce || isLoading}
-                                    onInput={onEmailInput}
-                                    width={inputWidth}
-                                    required
+                            {:else if mfaKind == 'otp' && activeOtps}
+                                <OtpRequest
+                                    {activeOtps}
+                                    purpose={mfaPurpose}
+                                    onSuccess={onMfaSuccess}
+                                    onError={onMfaError}
                                 />
                             {/if}
-                        </div>
-
-                        {#if showPasswordInput}
-                            <InputPassword
-                                bind:ref={refPassword}
-                                name="password"
-                                bind:value={password}
-                                autocomplete="current-password"
-                                label={t.common.password}
-                                placeholder={t.common.password}
-                                maxLength={256}
-                                disabled={tooManyRequests || clientMfaForce || isLoading}
-                                width={inputWidth}
-                                required
-                            />
                         {/if}
 
                         {#if !clientMfaForce}
@@ -807,7 +758,6 @@ onMount(async () => {
                                         />
                                     {:else}
                                         <Input
-                                            bind:ref={refEmail}
                                             typ="email"
                                             name="email"
                                             bind:value={email}
@@ -824,7 +774,8 @@ onMount(async () => {
                                         />
                                     {/if}
                                 </div>
-{#if showPasswordInput}
+
+                                {#if showPasswordInput}
                                     <InputPassword
                                         bind:ref={refPassword}
                                         name="password"
@@ -858,8 +809,6 @@ onMount(async () => {
                                         style:display="none"
                                     />
                                 {/if}
-                            {/if}
-                                {/if}
 
                                 {#if !tooManyRequests && !clientMfaForce}
                                     {#if showReset && !isAtproto}
@@ -875,7 +824,7 @@ onMount(async () => {
                                         <div class="btn flex-col">
                                             <Button
                                                 type="submit"
-ariaLabel={t.authorize.login}
+                                                ariaLabel={t.authorize.login}
                                                 onclick={() => onSubmit()}
                                                 isDisabled={email.length === 0}
                                                 {isLoading}
@@ -883,7 +832,6 @@ ariaLabel={t.authorize.login}
                                                 {t.authorize.login}
                                             </Button>
                                         </div>
-                                    </div>
                                         {#if isAtproto}
                                             <div class="btn flex-col">
                                                 <Button

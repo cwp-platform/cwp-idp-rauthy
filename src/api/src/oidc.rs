@@ -78,26 +78,42 @@ pub async fn get_authorize(
     req: HttpRequest,
     accept_encoding: web::Header<header::AcceptEncoding>,
     browser_id: BrowserId,
-    Query(params): Query<AuthRequest>,
+    Query(params): Query<Option<AuthRequest>>,
     principal: ReqPrincipal,
 ) -> Result<HttpResponse, ErrorResponse> {
+    // The unified login/register page can be opened without any OIDC client params
+    // (e.g. `GET /auth/v1/oidc/authorize`). In that case we fall back to the account
+    // client (`rauthy`) — the frontend supplies client_id/redirect_uri + a fresh PKCE
+    // challenge when submitting the login form. Keeping `AuthRequest` in its upstream
+    // shape (non-optional fields) minimizes the merge surface on every upstream sync.
+    let is_default_mode = params.is_none();
+    let params = params.unwrap_or_else(|| AuthRequest {
+        client_id: String::from("rauthy"),
+        redirect_uri: format!("{}oidc/callback", RauthyConfig::get().issuer),
+        response_type: String::from("code"),
+        scope: String::from("openid profile email"),
+        state: None,
+        code_challenge: None,
+        code_challenge_method: None,
+        max_age: None,
+        prompt: None,
+        resource: None,
+    });
     params.validate()?;
 
     let principal = principal.into_inner();
     let lang = Language::try_from(&req).unwrap_or_default();
 
-    let (client, origin_header) = if params.client_id.is_none() {
+    let (client, origin_header) = if is_default_mode {
         // No OIDC client given -> serve the unified login/register page bound to the
         // account client (`rauthy`). The frontend supplies client_id, redirect_uri and a
         // freshly generated PKCE challenge when submitting the login form.
         (Client::find(String::from("rauthy")).await?, None)
     } else {
-        let client_id: &str = params.client_id.as_deref().unwrap();
-        let redirect_uri: &str = params.redirect_uri.as_deref().unwrap_or_default();
         match validation::validate_auth_req_param(
             &req,
-            client_id,
-            redirect_uri,
+            &params.client_id,
+            &params.redirect_uri,
             &params.code_challenge,
             &params.code_challenge_method,
         )
@@ -171,17 +187,13 @@ pub async fn get_authorize(
             .unwrap_or(false)
         && principal.validate_session_auth().is_err()
     {
-// RFC 9207 - error responses carry `iss` as well
+        // RFC 9207 - error responses carry `iss` as well
         let loc = authorization_redirect(
-            params.redirect_uri.as_deref().unwrap_or_default(),
+            &params.redirect_uri,
             &[("error", "login_required")],
             params.state.as_deref(),
             &RauthyConfig::get().issuer,
         );
-
-        return Ok(HttpResponse::Found()
-            .insert_header(("location", loc))
-            .finish());
 
         return Ok(HttpResponse::Found()
             .insert_header(("location", loc))

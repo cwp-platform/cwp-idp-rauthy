@@ -177,19 +177,14 @@ pub struct AddressClaim {
 #[derive(Deserialize, Validate, ToSchema, IntoParams)]
 pub struct AuthRequest {
     /// Validation: `^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%]{2,128}$`
-    ///
-    /// Optional so the unified login/register page can be opened without an
-    /// OIDC client (falls back to the account client `rauthy` server-side).
     #[validate(regex(
         path = "*RE_CLIENT_ID",
         code = "^[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]{2,256}$"
     ))]
-    pub client_id: Option<String>,
+    pub client_id: String,
     /// Validation: `[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$`
-    ///
-    /// Optional for the same reason as `client_id`.
     #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$"))]
-    pub redirect_uri: Option<String>,
+    pub redirect_uri: String,
     /// Validation: `[a-z0-9-_/]{2,128}`
     #[validate(regex(path = "*RE_LOWERCASE", code = "[a-z0-9-_/]{2,128}"))]
     #[serde(default = "default_response_type")]
