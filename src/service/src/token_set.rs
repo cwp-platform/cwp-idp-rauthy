@@ -19,12 +19,14 @@ use rauthy_jwt::claims::{
     ActClaim, JwtAccessClaims, JwtAmrValue, JwtCommonClaims, JwtIdClaims, JwtTokenType,
     validate_no_reserved_collision,
 };
-use rauthy_jwt::token::JwtToken;
+use rauthy_jwt::token::{JwtHeaderType, JwtToken};
 use ring::digest;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::{Add, Sub};
 use std::str::FromStr;
+use std::time::Duration;
 use utoipa::ToSchema;
 
 pub struct AccessTokenJti(String);
@@ -43,7 +45,7 @@ impl TryFrom<&str> for AtHashAlg {
             "RS256" => Self::Sha256,
             "RS384" => Self::Sha384,
             "RS512" => Self::Sha512,
-            "EdDSA" => Self::Sha512,
+            "EdDSA" | "Ed25519" => Self::Sha512,
             _ => {
                 return Err(ErrorResponse::new(
                     ErrorResponseType::Internal,
@@ -109,7 +111,14 @@ pub struct SessionId(pub String);
 pub struct TokenNonce(pub String);
 
 /// Contains the scopes as a single String separated by `\s`
-pub struct TokenScopes(pub String);
+pub struct TokenScopes<'a>(pub Cow<'a, str>);
+
+impl<'a> TokenScopes<'a> {
+    #[inline]
+    pub fn new(scopes: impl Into<Cow<'a, str>>) -> Self {
+        Self(scopes.into())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TokenSet {
@@ -120,6 +129,9 @@ pub struct TokenSet {
     pub expires_in: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
+    /// Granted scope, RFC 6749 §5.1; always equals the access token's `scope` claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 impl TokenSet {
@@ -130,7 +142,7 @@ impl TokenSet {
         client: &Client,
         dpop_fingerprint: Option<DpopFingerprint>,
         lifetime: i64,
-        scope: Option<TokenScopes>,
+        scope: TokenScopes<'_>,
         scope_customs: Option<(Vec<&Scope>, &Option<HashMap<String, Vec<u8>>>)>,
         sid: Option<SessionId>,
         resource: Option<&str>,
@@ -141,9 +153,7 @@ impl TokenSet {
             DeviceCodeFlow::Yes(did) => Some(did),
             DeviceCodeFlow::No => None,
         };
-        let scope = scope
-            .map(|s| Cow::from(s.0))
-            .unwrap_or_else(|| Cow::from(client.default_scopes.replace(',', " ")));
+        let scope = scope.0;
 
         let email = if scope.contains("email") {
             user.as_ref().map(|u| u.email.as_str())
@@ -283,7 +293,7 @@ impl TokenSet {
 
         let key_pair_alg = JwkKeyPairAlg::from_str(&client.access_token_alg)?;
         let kp = JwkKeyPair::find_latest(key_pair_alg).await?;
-        let token = JwtToken::build(&kp, &claims_new_impl)?;
+        let token = JwtToken::build(&kp, &claims_new_impl, JwtHeaderType::AtJwt)?;
 
         Ok((AccessTokenJti(issued_token.jti), token))
     }
@@ -305,11 +315,18 @@ impl TokenSet {
     ) -> Result<String, ErrorResponse> {
         let config = RauthyConfig::get();
 
-        let amr = if user.has_webauthn_enabled() && auth_code_flow == AuthCodeFlow::Yes {
-            JwtAmrValue::Mfa.as_str()
+        let amr = if auth_code_flow == AuthCodeFlow::Yes {
+            if user.has_webauthn_enabled() {
+                JwtAmrValue::Mfa.as_str()
+            } else if user.has_otp_enabled().await {
+                JwtAmrValue::Otp.as_str()
+            } else {
+                JwtAmrValue::Pwd.as_str()
+            }
         } else {
             JwtAmrValue::Pwd.as_str()
         };
+
         // Solid-OIDC ephemeral clients additionally carry the `solid` audience.
         let aud = if client.is_ephemeral() && config.vars.ephemeral_clients.enable_solid_aud {
             Audience::Multiple(vec![
@@ -350,6 +367,7 @@ impl TokenSet {
             email: None,
             email_verified: None,
             preferred_username: None,
+            name: None,
             given_name: None,
             family_name: None,
             address: None,
@@ -374,6 +392,18 @@ impl TokenSet {
         if scope.contains("profile") {
             claims.given_name = Some(user.given_name.as_str());
             claims.family_name = user.family_name.as_deref();
+
+            let mut name = user.given_name.clone();
+            if let Some(family) = &user.family_name {
+                if !name.is_empty() {
+                    name.push(' ');
+                }
+                name.push_str(family);
+            }
+            if !name.is_empty() {
+                claims.name = Some(name);
+            }
+
             claims.locale = Some(user.language.as_str());
 
             if let Some(uv) = &user_values {
@@ -448,7 +478,7 @@ impl TokenSet {
 
         let key_pair_alg = JwkKeyPairAlg::from_str(&client.id_token_alg)?;
         let kp = JwkKeyPair::find_latest(key_pair_alg).await?;
-        JwtToken::build(&kp, &claims)
+        JwtToken::build(&kp, &claims, JwtHeaderType::Jwt)
     }
 
     /// Builds the refresh token for a user after all validation has been successful
@@ -458,8 +488,8 @@ impl TokenSet {
         dpop_fingerprint: Option<DpopFingerprint>,
         client: &Client,
         auth_time: AuthTime,
-        access_token_lifetime: i64,
-        scope: Option<TokenScopes>,
+        access_token_lifetime: Duration,
+        scope: Option<TokenScopes<'_>>,
         is_mfa: bool,
         device_code_flow: DeviceCodeFlow,
         sid: Option<SessionId>,
@@ -472,28 +502,30 @@ impl TokenSet {
             None
         };
 
-        let now = Utc::now().timestamp();
-        let nbf = if RauthyConfig::get().vars.access.disable_refresh_token_nbf {
+        let config = RauthyConfig::get();
+        let now = Utc::now();
+        let nbf = if config.vars.access.disable_refresh_token_nbf {
             now
         } else {
             // allow 60 second early usage
-            now + access_token_lifetime - 60
+            now.add(access_token_lifetime).sub(Duration::from_secs(60))
         };
         let exp = if did.is_some() {
-            nbf + 3600 * RauthyConfig::get().vars.device_grant.refresh_token_lifetime as i64
+            nbf.add(config.vars.device_grant.refresh_token_lifetime)
         } else {
-            nbf + 3600 * RauthyConfig::get().vars.lifetimes.refresh_token_lifetime as i64
-        };
+            nbf.add(config.vars.lifetimes.refresh_token_lifetime)
+        }
+        .timestamp();
 
         let token = {
             let jti = secure_random_alnum(8);
 
             let claims = rauthy_jwt::claims::JwtRefreshClaims {
                 common: JwtCommonClaims {
-                    iat: now,
-                    nbf,
+                    iat: now.timestamp(),
+                    nbf: nbf.timestamp(),
                     exp,
-                    iss: &RauthyConfig::get().issuer,
+                    iss: &config.issuer,
                     // jti is not really used for any validation, it just exists
                     // to bring a bit more randomness into the claims
                     jti: Some(&jti),
@@ -515,7 +547,7 @@ impl TokenSet {
             };
 
             let kp = JwkKeyPair::find_latest(JwkKeyPairAlg::default()).await?;
-            JwtToken::build(&kp, &claims)?
+            JwtToken::build(&kp, &claims, JwtHeaderType::Jwt)?
         };
 
         // only save the last 50 characters for validation
@@ -527,9 +559,9 @@ impl TokenSet {
                 validation_string,
                 device_id,
                 user.id.clone(),
-                nbf,
+                nbf.timestamp(),
                 exp,
-                scope.map(|s| s.0),
+                scope.map(|s| s.0.into_owned()),
                 Some(jti.0),
             )
             .await?;
@@ -537,9 +569,9 @@ impl TokenSet {
             RefreshToken::create(
                 validation_string,
                 user.id.clone(),
-                nbf,
+                nbf.timestamp(),
                 exp,
-                scope.map(|s| s.0),
+                scope.map(|s| s.0.into_owned()),
                 is_mfa,
                 sid.map(|s| s.0),
                 Some(jti.0),
@@ -560,12 +592,13 @@ impl TokenSet {
         } else {
             JwtTokenType::Bearer
         };
+        let scope = client.default_scopes.replace(',', " ");
         let (_jti, access_token) = Self::build_access_token(
             None,
             client,
             dpop_fingerprint,
             client.access_token_lifetime as i64,
-            None,
+            TokenScopes::new(scope.as_str()),
             None,
             None,
             resource,
@@ -580,6 +613,7 @@ impl TokenSet {
             id_token: None,
             expires_in: client.access_token_lifetime,
             refresh_token: None,
+            scope: Some(scope),
         })
     }
 
@@ -591,7 +625,7 @@ impl TokenSet {
         user: Option<&User>,
         client: &Client,
         dpop_fingerprint: Option<DpopFingerprint>,
-        scope: TokenScopes,
+        scope: TokenScopes<'_>,
         resource: Option<&str>,
         act: Option<ActClaim<'_>>,
     ) -> Result<Self, ErrorResponse> {
@@ -642,7 +676,7 @@ impl TokenSet {
             client,
             dpop_fingerprint,
             client.access_token_lifetime as i64,
-            Some(scope),
+            TokenScopes::new(scope.0.as_ref()),
             customs_access,
             None,
             resource,
@@ -657,6 +691,7 @@ impl TokenSet {
             id_token: None,
             expires_in: client.access_token_lifetime,
             refresh_token: None,
+            scope: Some(scope.0.into_owned()),
         })
     }
 
@@ -668,17 +703,16 @@ impl TokenSet {
         auth_time: AuthTime,
         dpop_fingerprint: Option<DpopFingerprint>,
         nonce: Option<TokenNonce>,
-        scopes: Option<TokenScopes>,
+        scopes: Option<TokenScopes<'_>>,
         sid: Option<SessionId>,
         resource: Option<String>,
         auth_code_flow: AuthCodeFlow,
         device_code_flow: DeviceCodeFlow,
     ) -> Result<Self, ErrorResponse> {
         let scopes = scopes.map(|s| s.0);
-        let scope = if let Some(s) = &scopes {
-            s.clone()
-        } else {
-            client.default_scopes.clone().replace(',', " ")
+        let scope = match scopes.as_deref() {
+            Some(s) => Cow::Borrowed(s),
+            None => Cow::Owned(client.default_scopes.replace(',', " ")),
         };
 
         // check for any non-custom scopes and prepare data
@@ -759,7 +793,7 @@ impl TokenSet {
             client,
             dpop_fingerprint.clone(),
             lifetime,
-            Some(TokenScopes(scope.clone())),
+            TokenScopes::new(scope.as_ref()),
             customs_access,
             sid.clone(),
             resource.as_deref(),
@@ -786,6 +820,7 @@ impl TokenSet {
             auth_code_flow,
         )
         .await?;
+        let scope = scope.into_owned();
         let refresh_token = if client.allow_refresh_token() {
             Some(
                 Self::build_refresh_token(
@@ -793,8 +828,8 @@ impl TokenSet {
                     dpop_fingerprint,
                     client,
                     auth_time,
-                    lifetime,
-                    scopes.map(TokenScopes),
+                    Duration::from_secs(lifetime as u64),
+                    scopes.map(TokenScopes::new),
                     user.has_webauthn_enabled(),
                     device_code_flow,
                     sid,
@@ -813,6 +848,7 @@ impl TokenSet {
             id_token: Some(id_token),
             expires_in: client.access_token_lifetime,
             refresh_token,
+            scope: Some(scope),
         })
     }
 }

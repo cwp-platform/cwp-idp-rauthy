@@ -73,6 +73,7 @@ export interface I18nAdmin {
         forceMfa: string;
         groupLoginPrefix: string;
         name: string;
+        passwordFlowMfaWarn: string;
         scim: {
             // inserted as html
             baseUri: string;
@@ -185,7 +186,7 @@ export interface I18nAdmin {
             time: string;
             targetTime: string;
             tune: string;
-            pDetials: string;
+            pDetails: string;
             pTune: string;
             pUtility: string;
         };
@@ -442,10 +443,20 @@ export interface I18nAdmin {
         lastLogin: string;
         manualInitDesc: string;
         manualInit: string;
-        mfaDelete1: string;
-        // inserted as html
-        mfaDelete2: string;
-        noMfaKeys: string;
+        mfa: {
+            otp: {
+                title: string;
+                mfaDelete1: string;
+                mfaDelete2: string;
+                noMfaOtps: string;
+            };
+            webauthn: {
+                title: string;
+                mfaDelete1: string;
+                mfaDelete2: string;
+                noMfaKeys: string;
+            };
+        };
         pkOnly1: string;
         pkOnly2: string;
         pkOnly3: string;
@@ -460,5 +471,14 @@ export interface I18nAdmin {
         css: string;
         origin: string;
         uri: string;
+        redirectUri: {
+            comma: string;
+            controlChar: string;
+            fragment: string;
+            // `{{ KEY }}` is replaced with the reserved query parameter
+            reservedKey: string;
+            // like `reservedKey`, for a post logout redirect URI
+            reservedKeyLogout: string;
+        };
     };
 }

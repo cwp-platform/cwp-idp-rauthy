@@ -8,7 +8,7 @@ use rauthy_data::events::event::Event;
 use rauthy_data::html::templates::TooManyRequestsHtml;
 use rauthy_data::rauthy_config::RauthyConfig;
 use rauthy_error::{ErrorResponse, ErrorResponseType};
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::net::IpAddr;
 use std::ops::{Add, Sub};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -26,6 +26,7 @@ pub async fn handle_login_delay(
     start: Duration,
     res: Result<HttpResponse, ErrorResponse>,
     has_password_been_hashed: bool,
+    user_failed_logins: Option<i64>,
 ) -> Result<HttpResponse, ErrorResponse> {
     let client = DB::hql();
     let success_time: i64 = client
@@ -51,8 +52,12 @@ pub async fn handle_login_delay(
             Ok(resp)
         }
         Err(err) => {
-            let failed_logins = FailedLoginCounter::increase(peer_ip.to_string()).await?;
-            let failed_logins = min(failed_logins, u32::MAX as i64) as u32;
+            let counter = FailedLoginCounter::increase(peer_ip.to_string()).await?;
+            // When we combine the fails per IP with the fails from the user and use the higher
+            // value, we not only get the limiting for brute-force from a single IP, but also for
+            // multiple small tries from different IPs for the same user / email.
+            let combined = max(counter, user_failed_logins.unwrap_or(0));
+            let failed_logins = min(combined, u32::MAX as i64) as u32;
             warn!("Failed Logins from {peer_ip}: {failed_logins}");
 
             RauthyConfig::get()
@@ -107,9 +112,10 @@ pub async fn handle_login_delay(
 
 async fn build_send_event(
     peer_ip: &IpAddr,
-    nbf_seconds: u32,
+    nbf_seconds: u64,
 ) -> Result<HttpResponse, ErrorResponse> {
-    let not_before = Utc::now().add(chrono::Duration::seconds(nbf_seconds as i64));
+    let nbf = Duration::from_secs(nbf_seconds);
+    let not_before = Utc::now().add(nbf);
     let ts = not_before.timestamp();
     let html = TooManyRequestsHtml::build(peer_ip.to_string(), ts);
 
@@ -118,7 +124,7 @@ async fn build_send_event(
         .send_async(Event::ip_blacklisted(not_before, peer_ip.to_string()))
         .await
         .unwrap();
-    IpBlacklist::put(peer_ip.to_string(), nbf_seconds as i64).await?;
+    IpBlacklist::put(peer_ip.to_string(), nbf).await?;
 
     Err(ErrorResponse::new(
         ErrorResponseType::TooManyRequests(ts),

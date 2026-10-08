@@ -16,6 +16,7 @@ use rauthy_common::constants::{
 use rauthy_common::utils::real_ip_from_req;
 use rauthy_data::api_cookie::ApiCookie;
 use rauthy_data::email::email_registered_already::send_email_registered_already;
+use rauthy_data::email::notification::send_email_passkey_removed;
 use rauthy_data::entity::api_keys::{AccessGroup, AccessRights};
 use rauthy_data::entity::browser_id::BrowserId;
 use rauthy_data::entity::clients::Client;
@@ -26,6 +27,9 @@ use rauthy_data::entity::email_rate_limit::EmailRateLimit;
 use rauthy_data::entity::groups::Group;
 use rauthy_data::entity::login_locations::LoginLocation;
 use rauthy_data::entity::mfa_mod_token::MfaModToken;
+use rauthy_data::entity::one_time_password::{
+    self, OneTimePassword, OtpAdditionalData, OtpServiceReq,
+};
 use rauthy_data::entity::password::PasswordPolicy;
 use rauthy_data::entity::pictures::{PICTURE_STORAGE_TYPE, PictureStorage, UserPicture};
 use rauthy_data::entity::pow::PowEntity;
@@ -39,7 +43,9 @@ use rauthy_data::entity::user_revoke::UserRevoke;
 use rauthy_data::entity::users::User;
 use rauthy_data::entity::users_values::UserValues;
 use rauthy_data::entity::webauthn;
-use rauthy_data::entity::webauthn::{PasskeyEntity, WebauthnAdditionalData, WebauthnServiceReq};
+use rauthy_data::entity::webauthn::auth_data::WebauthnAdditionalData;
+use rauthy_data::entity::webauthn::auth_req::WebauthnServiceReq;
+use rauthy_data::entity::webauthn::passkey::PasskeyEntity;
 use rauthy_data::entity::webids::WebId;
 use rauthy_data::events::event::Event;
 use rauthy_data::html::HtmlCached;
@@ -59,6 +65,7 @@ use spow::pow::Pow;
 use std::cmp::max;
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::time::Duration;
 use tokio::task;
 use tracing::{debug, error, info, warn};
 use validator::Validate;
@@ -450,22 +457,7 @@ pub async fn post_users_register_handle(
     if let Some(redirect_uri) = &payload.redirect_uri
         && !reg.allow_open_redirect
     {
-        let mut allow = false;
-        for uri in Client::find_all_client_uris().await? {
-            // redirect_uri (OIDC callback, напр. https://host/auth/callback) должен
-            // лежать на домене клиента (client_uri https://host). Обратное сравнение
-            // (uri.starts_with(redirect_uri)) ломало регистрацию с полным callback'ом.
-            if redirect_uri.starts_with(&uri) {
-                allow = true;
-                break;
-            }
-        }
-        if !allow {
-            return Err(ErrorResponse::new(
-                ErrorResponseType::BadRequest,
-                "given `redirect_uri` not allowed",
-            ));
-        }
+        validate_reg_redirect_uri(redirect_uri).await?;
     }
 
     let lang = Language::try_from(&req).unwrap_or_default();
@@ -533,6 +525,56 @@ pub async fn post_users_register_handle(
     Ok(HttpResponse::NoContent()
         .insert_header(HEADER_ALLOW_ALL_ORIGINS)
         .finish())
+}
+
+/// A `client_uri` can only serve as a prefix anchor for a `redirect_uri` if it carries a
+/// non-empty host part. Otherwise, the remainder of `redirect_uri` could supply the host itself:
+/// e.g. a stored `client_uri` of `"https://"` (or `"/"`) would allow any absolute URL to pass,
+/// and the WHATWG parser resolves `https:///evil.com/x` with host `evil.com`.
+fn client_uri_has_non_empty_host(uri: &str) -> bool {
+    let authority_start = uri.find("//").map_or(0, |i| i + 2);
+    let Some(authority) = uri.get(authority_start..) else {
+        return false;
+    };
+    let host = authority
+        .split(|c: char| ['/', '?', '#'].contains(&c))
+        .next()
+        .unwrap_or("");
+    !host.is_empty()
+}
+
+/// Returns `true` if `redirect_uri` equals `client_uri` or continues it at a path, query or
+/// fragment boundary. The prefix must carry a non-empty host (see
+/// [`client_uri_has_non_empty_host`]), otherwise the remainder of `redirect_uri` could supply
+/// the host itself (open redirect).
+pub(crate) fn redirect_uri_matches_client(redirect_uri: &str, client_uri: &str) -> bool {
+    if !client_uri_has_non_empty_host(client_uri) {
+        return false;
+    }
+    match redirect_uri.strip_prefix(client_uri) {
+        None => false,
+        Some(rest) => {
+            rest.is_empty()
+                || rest.starts_with('/')
+                || rest.starts_with('?')
+                || rest.starts_with('#')
+        }
+    }
+}
+
+/// Validates a registration or password-reset redirect URI against configured clients.
+#[inline]
+pub(super) async fn validate_reg_redirect_uri(redirect_uri: &str) -> Result<(), ErrorResponse> {
+    for uri in Client::find_all_client_uris().await? {
+        if redirect_uri_matches_client(redirect_uri, &uri) {
+            return Ok(());
+        }
+    }
+
+    Err(ErrorResponse::new(
+        ErrorResponseType::BadRequest,
+        "given `redirect_uri` not allowed",
+    ))
 }
 
 /// Returns a single user by its *id*
@@ -753,7 +795,9 @@ pub async fn post_user_mfa_token(
     let user = User::find(user_id.to_string()).await?;
 
     if let Some(password) = payload.password {
-        if user.has_webauthn_enabled() {
+        if user.has_webauthn_enabled()
+            || (RauthyConfig::get().vars.otp.enable && user.has_otp_enabled().await)
+        {
             return Err(ErrorResponse::new(
                 ErrorResponseType::BadRequest,
                 "must provide `mfa_code` instead of `password`",
@@ -767,20 +811,30 @@ pub async fn post_user_mfa_token(
             ));
         }
     } else if let Some(code) = payload.mfa_code {
-        if !user.has_webauthn_enabled() {
+        if user.has_webauthn_enabled() {
+            let svc_req = WebauthnServiceReq::find(code).await?;
+            if svc_req.user_id != user.id {
+                return Err(ErrorResponse::new(
+                    ErrorResponseType::BadRequest,
+                    "mismatch in UserID",
+                ));
+            }
+            svc_req.delete().await?;
+        } else if RauthyConfig::get().vars.otp.enable && user.has_otp_enabled().await {
+            let svc_req = OtpServiceReq::find(code).await?;
+            if svc_req.user_id != user.id {
+                return Err(ErrorResponse::new(
+                    ErrorResponseType::BadRequest,
+                    "mismatch in UserID",
+                ));
+            }
+            svc_req.delete().await?;
+        } else {
             return Err(ErrorResponse::new(
                 ErrorResponseType::BadRequest,
                 "must provide `password`",
             ));
         }
-        let svc_req = WebauthnServiceReq::find(code).await?;
-        if svc_req.user_id != user.id {
-            return Err(ErrorResponse::new(
-                ErrorResponseType::BadRequest,
-                "mismatch in UserID",
-            ));
-        }
-        svc_req.delete().await?;
     } else {
         return Err(ErrorResponse::new(
             ErrorResponseType::BadRequest,
@@ -920,7 +974,7 @@ async fn validate_user_picture_access(
 
     if let Ok(bearer) = get_bearer_token_from_header(req.headers()) {
         let mut buf = Vec::with_capacity(512);
-        if JwtToken::validate_claims_into(&bearer, None, 0, &mut buf)
+        if JwtToken::validate_claims_into(&bearer, None, Duration::from_secs(0), &mut buf, false)
             .await
             .is_ok()
         {
@@ -1078,7 +1132,7 @@ pub async fn delete_user_device(
         ));
     }
 
-    DeviceEntity::revoke_refresh_tokens(&payload.device_id).await?;
+    DeviceEntity::delete_refresh_tokens(&payload.device_id).await?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -1228,6 +1282,7 @@ pub async fn put_user_password_reset(
     password_reset::handle_put_user_password_reset(req, path.into_inner(), payload)
         .await
         .map(|(cookie, location)| {
+            debug!("user reset redirect uri loc: {location:?}");
             if let Some(loc) = location {
                 HttpResponse::Ok()
                     .insert_header((LOCATION, loc))
@@ -1308,6 +1363,358 @@ async fn user_revoke_handle(
     Ok(())
 }
 
+/// Get status of all registered OTP of a user
+///
+/// **Permissions**
+/// - authenticated and logged in user for this very {id}
+/// - authenticated and logged in admin
+#[utoipa::path(
+    get,
+    path = "/users/{id}/otp",
+    tag = "users",
+    responses(
+        (status = 200, description = "Ok", body = [OtpGetResponse]),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+    ),
+)]
+#[get("/users/{id}/otp")]
+pub async fn get_user_otps(
+    id: web::Path<String>,
+    principal: ReqPrincipal,
+) -> Result<HttpResponse, ErrorResponse> {
+    if !&RauthyConfig::get().vars.otp.enable {
+        warn!("Request to get OTPs but `otp.enable` is set to `false`");
+        return Err(ErrorResponse::new(
+            ErrorResponseType::Forbidden,
+            "feature disabled",
+        ));
+    }
+
+    if principal
+        .validate_api_key_or_admin_session(AccessGroup::Users, AccessRights::Read)
+        .is_err()
+    {
+        principal.validate_session_auth()?;
+        if principal.is_user(&id).is_err() {
+            principal.validate_group_admin_session()?;
+            let target = User::find(id.clone()).await?;
+            principal.validate_group_admin_can_manage(target.roles_iter(), target.groups_iter())?;
+        }
+    }
+
+    let user_id = id.into_inner();
+
+    let resp = OneTimePassword::find_for_user(&user_id)
+        .await?
+        .into_iter()
+        .map(OtpGetResponse::from)
+        .collect::<Vec<OtpGetResponse>>();
+
+    Ok(HttpResponse::Ok().json(resp))
+}
+
+/// Create a new OTP
+///
+/// **Permissions**
+/// - authenticated and logged in user for this very {id}
+#[utoipa::path(
+    post,
+    path = "/users/{id}/otp",
+    tag = "users",
+    request_body = OtpCreateRequest,
+    responses(
+        (status = 201, description = "Created", body = OtpGetResponse),
+        (status = 400, description = "BadRequest", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+        (status = 406, description = "NotAcceptable", body = ErrorResponse),
+    )
+)]
+#[post("/users/{id}/otp")]
+pub async fn post_user_otp(
+    id: web::Path<String>,
+    principal: ReqPrincipal,
+    req: HttpRequest,
+    Json(payload): Json<OtpCreateRequest>,
+) -> Result<HttpResponse, ErrorResponse> {
+    if !&RauthyConfig::get().vars.otp.enable {
+        warn!("Request to create an OTP but `otp.enable` is set to `false`");
+        return Err(ErrorResponse::new(
+            ErrorResponseType::Forbidden,
+            "feature disabled",
+        ));
+    }
+    payload.validate()?;
+
+    let user_id: String = id.into_inner();
+    principal.validate_user_session(&user_id)?;
+
+    let token = MfaModToken::find(&payload.mfa_mod_token_id).await?;
+    let ip = real_ip_from_req(&req)?;
+    token.validate(principal.user_id()?, ip)?;
+
+    // Prevents users from having multiple OTPs of the same kind, except for time-base OTPs.
+    let mut otp = if payload.otp_kind.ne(&OtpKind::Time)
+        && let Ok(mut otp) = OneTimePassword::find_kind_for_user(&payload.otp_kind, &user_id).await
+    {
+        if otp.is_active {
+            return Err(ErrorResponse::new(
+                ErrorResponseType::NotAccepted,
+                "otp already exist",
+            ));
+        }
+        // reuse the existing inactive row, but keep the name requested in this call
+        otp.name = payload.otp_name;
+        otp
+    } else {
+        OneTimePassword::create(user_id, payload.otp_name, payload.otp_kind).await?
+    };
+    otp.request_otp().await?;
+    let resp: OtpGetResponse = otp.into();
+    Ok(HttpResponse::Created().json(resp))
+}
+
+/// Activate an OTP
+///
+/// **Permissions**
+/// - authenticated and logged in user for this very {id}
+#[utoipa::path(
+    put,
+    path = "/users/{id}/otp",
+    tag = "users",
+    request_body = OtpActivateRequest,
+    responses(
+        (status = 200, description = "Ok"),
+        (status = 400, description = "BadRequest", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+        (status = 404, description = "NotFound", body = ErrorResponse),
+    )
+)]
+#[put("/users/{id}/otp")]
+pub async fn put_user_otp(
+    id: web::Path<String>,
+    principal: ReqPrincipal,
+    req: HttpRequest,
+    Json(payload): Json<OtpActivateRequest>,
+) -> Result<HttpResponse, ErrorResponse> {
+    if !&RauthyConfig::get().vars.otp.enable {
+        warn!("Request to activate an OTP but `otp.enable` is set to `false`");
+        return Err(ErrorResponse::new(
+            ErrorResponseType::Forbidden,
+            "feature disabled",
+        ));
+    }
+    payload.validate()?;
+
+    let user_id: String = id.into_inner();
+    principal.validate_user_session(&user_id)?;
+
+    let token = MfaModToken::find(&payload.mfa_mod_token_id).await?;
+    let ip = real_ip_from_req(&req)?;
+    token.validate(principal.user_id()?, ip)?;
+
+    let mut otp = OneTimePassword::find_by_id_for_user(&payload.otp_id, &user_id).await?;
+    otp.validate(&payload.otp_code).await?;
+    otp.activate().await?;
+    Ok(HttpResponse::Ok().finish())
+}
+
+/// Delete an OTP
+///
+/// **Permissions**
+/// - authenticated and logged in user for this very {id}
+/// - authenticated and logged in admin
+#[utoipa::path(
+    delete,
+    path = "/users/{id}/otp",
+    tag = "users",
+    request_body = OtpDeleteRequest,
+    responses(
+        (status = 200, description = "Ok"),
+        (status = 400, description = "BadRequest", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+    )
+)]
+#[delete("/users/{id}/otp")]
+pub async fn delete_user_otp(
+    id: web::Path<String>,
+    principal: ReqPrincipal,
+    req: HttpRequest,
+    Json(payload): Json<OtpDeleteRequest>,
+) -> Result<HttpResponse, ErrorResponse> {
+    if !&RauthyConfig::get().vars.otp.enable {
+        warn!("Request to delete an OTP but `otp.enable` is set to `false`");
+        return Err(ErrorResponse::new(
+            ErrorResponseType::Forbidden,
+            "Feature disabled",
+        ));
+    }
+    payload.validate()?;
+
+    let user_id: String = id.into_inner();
+
+    if principal
+        .validate_api_key_or_admin_session(AccessGroup::Users, AccessRights::Delete)
+        .is_ok()
+    {
+        if principal.is_admin() {
+            warn!(
+                "Otp delete request from admin for user {} for otp {}",
+                user_id, payload.otp_id
+            );
+        } else {
+            warn!(
+                "Otp delete request from API for user {} for otp {}",
+                user_id, payload.otp_id
+            );
+        }
+    } else {
+        principal.validate_session_auth()?;
+
+        if principal.is_user(&user_id).is_ok() {
+            let Some(token_id) = payload.mfa_mod_token_id else {
+                return Err(ErrorResponse::new(
+                    ErrorResponseType::BadRequest,
+                    "missing `mfa_mod_token_id`",
+                ));
+            };
+            let token = MfaModToken::find(&token_id).await?;
+            let ip = real_ip_from_req(&req)?;
+            token.validate(principal.user_id()?, ip)?;
+            warn!(
+                "Otp delete request from user {} for otp {}",
+                user_id, payload.otp_id
+            );
+        } else {
+            principal.validate_group_admin_session()?;
+            let target = User::find(user_id.clone()).await?;
+            principal.validate_group_admin_can_manage(target.roles_iter(), target.groups_iter())?;
+            warn!(
+                "Otp delete from group admin for user {} for otp {}",
+                user_id, payload.otp_id
+            );
+        }
+    }
+
+    let otp = OneTimePassword::find_by_id_for_user(&payload.otp_id, &user_id).await?;
+    OneTimePassword::delete(&otp.id).await?;
+    // make sure to delete any existing MFA cookie when a key is deleted
+    let cookie = ApiCookie::build(COOKIE_MFA, "", 0);
+    Ok(HttpResponse::Ok().cookie(cookie).finish())
+}
+
+/// Starts the authentication process using OTP for this user. This only works during
+/// the login. Service requests need to use the user-specific endpoint.
+#[utoipa::path(
+    post,
+    path = "/users/otp_start",
+    tag = "mfa",
+    request_body = OtpAuthStartRequest,
+    responses(
+        (status = 200, description = "Ok", body = OtpAuthStartResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+    ),
+)]
+#[post("/users/otp_start")]
+pub async fn post_otp_auth_start_login(
+    principal: ReqPrincipal,
+    Json(payload): Json<OtpAuthStartRequest>,
+) -> Result<HttpResponse, ErrorResponse> {
+    payload.validate()?;
+    let id = match payload.purpose {
+        MfaPurpose::Login(_) => {
+            // During Login, the session is allowed to be in init-only state. Realistically, the
+            // session middleware will not accept an init-session on this path, only authenticated
+            // ones, but we keep the logic here correct.
+            principal.validate_session_auth_or_init()?;
+            // The user.id might not exist in the session yet at this point. However, it's stored
+            // inside the Otp login data. The `start_start()` will take care of it.
+            None
+        }
+        MfaPurpose::PasswordReset => {
+            return Err(ErrorResponse::new(
+                ErrorResponseType::BadRequest,
+                "Password requests must use the user-specific otp start endpoint",
+            ));
+        }
+        _ => {
+            // for all other purposes, we need an authenticated session
+            principal.validate_session_auth()?;
+            Some(principal.user_id()?.to_string())
+        }
+    };
+    one_time_password::auth_start(id, &payload)
+        .await
+        .map(|res| HttpResponse::Ok().json(res))
+}
+
+/// Request another send of an active code in the authentication process for this user.
+///
+/// *Permissions**
+/// - authenticated and logged in user
+#[utoipa::path(
+    post,
+    path = "/users/otp_resend",
+    tag = "mfa",
+    request_body = OtpAuthResendRequest,
+    responses(
+        (status = 200, description = "Ok"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+    )
+)]
+#[post("/users/otp_resend")]
+pub async fn post_otp_auth_resend(
+    Json(payload): Json<OtpAuthResendRequest>,
+) -> Result<HttpResponse, ErrorResponse> {
+    payload.validate()?;
+
+    // We do not need to validate the principal here.
+    // All of this is done at the /start endpoint.
+    // This here will simply fail, if the secret code from the /start does not exist
+    // -> indirect validation through existing code.
+    one_time_password::auth_resend(payload).await?;
+    Ok(HttpResponse::Ok().finish())
+}
+
+/// Finishes the authentication process using OTP for this user.
+///
+/// **Permissions**
+/// - authenticated and logged in user
+#[utoipa::path(
+    post,
+    path = "/users/otp_finish",
+    tag = "mfa",
+    request_body = OtpAuthFinishRequest,
+    responses(
+        (status = 200, description = "Ok", body = OtpAdditionalData),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+    ),
+)]
+#[post("/users/otp_finish")]
+pub async fn post_otp_auth_finish_login(
+    req: HttpRequest,
+    browser_id: BrowserId,
+    principal: ReqPrincipal,
+    Json(payload): Json<OtpAuthFinishRequest>,
+) -> Result<HttpResponse, ErrorResponse> {
+    payload.validate()?;
+
+    // We do not need to further validate the principal here.
+    // All of this is done at the /start endpoint.
+    // This here will simply fail, if the secret code from the /start does not exist
+    // -> indirect validation through existing code.
+
+    let principal = principal.into_inner();
+    let res = one_time_password::auth_finish(&req, browser_id, principal.session, payload).await?;
+    Ok(res.into_response())
+}
+
 /// Get all registered Webauthn Passkeys for a user
 ///
 /// **Permissions**
@@ -1346,11 +1753,7 @@ pub async fn get_user_webauthn_passkeys(
         }
     }
 
-    let pks = PasskeyEntity::find_for_user(&id)
-        .await?
-        .into_iter()
-        .map(PasskeyResponse::from)
-        .collect::<Vec<PasskeyResponse>>();
+    let pks = PasskeyEntity::find_for_user_with_details(&id).await?;
 
     Ok(HttpResponse::Ok().json(pks))
 }
@@ -1382,12 +1785,13 @@ pub async fn post_webauthn_auth_start(
     payload.validate()?;
 
     let id = match payload.purpose {
-        // only for a Login purpose, this can be accessed without authentication (yet)
         MfaPurpose::Login(_) => {
-            // TODO this can be rejected in versions >= 0.37
-            // During Login, the session is allowed to be in init only state
-            principal.validate_session_auth_or_init()?;
-            id.into_inner()
+            // A Login should never be done via this endpoint to never possibly leak a `user_id`.
+            // Logins must use the user id agnostic endpoint.
+            return Err(ErrorResponse::new(
+                ErrorResponseType::BadRequest,
+                "Invalid endpoint for Webauthn auth ceremony",
+            ));
         }
 
         MfaPurpose::PasswordReset => {
@@ -1426,7 +1830,7 @@ pub async fn post_webauthn_auth_start(
         }
     };
 
-    webauthn::auth_start(Some(id), payload.purpose)
+    webauthn::authenticate::auth_start(Some(id), payload.purpose)
         .await
         .map(|res| HttpResponse::Ok().json(res))
 }
@@ -1462,7 +1866,8 @@ pub async fn post_webauthn_auth_finish(
     // -> indirect validation through existing code.
 
     let principal = principal.into_inner();
-    let res = webauthn::auth_finish(&req, browser_id, principal.session, payload).await?;
+    let res =
+        webauthn::authenticate::auth_finish(&req, browser_id, principal.session, payload).await?;
     Ok(res.into_response())
 }
 
@@ -1486,7 +1891,7 @@ pub async fn post_webauthn_auth_start_login(
 ) -> Result<HttpResponse, ErrorResponse> {
     payload.validate()?;
 
-    let id = match payload.purpose {
+    let (id, is_discover) = match payload.purpose {
         MfaPurpose::Login(_) => {
             // During Login, the session is allowed to be in init-only state. Realistically, the
             // session middleware will not accept an init-session on this path, only authenticated
@@ -1494,7 +1899,12 @@ pub async fn post_webauthn_auth_start_login(
             principal.validate_session_auth_or_init()?;
             // The user.id might not exist in the session yet at this point. However, it's stored
             // inside the webauthn login data. The `start_start()` will take care of it.
-            None
+            (None, false)
+        }
+
+        MfaPurpose::Discover => {
+            principal.validate_session_auth_or_init()?;
+            (None, true)
         }
 
         MfaPurpose::PasswordReset => {
@@ -1507,13 +1917,23 @@ pub async fn post_webauthn_auth_start_login(
         _ => {
             // for all other purposes, we need an authenticated session
             principal.validate_session_auth()?;
-            Some(principal.user_id()?.to_string())
+            (Some(principal.user_id()?.to_string()), false)
         }
     };
 
-    webauthn::auth_start(id, payload.purpose)
-        .await
-        .map(|res| HttpResponse::Ok().json(res))
+    if is_discover {
+        webauthn::authenticate_rk::auth_start_discover().await
+    } else {
+        webauthn::authenticate::auth_start(id, payload.purpose).await
+    }
+    .map_err(|err| {
+        error!("Webauthn Auth Start error: {err:?}");
+        ErrorResponse::new(
+            ErrorResponseType::Unauthorized,
+            "Error during Webauthn auth start ceremony",
+        )
+    })
+    .map(|res| HttpResponse::Ok().json(res))
 }
 
 /// Finishes the authentication process for a WebAuthn Device for this user
@@ -1546,7 +1966,23 @@ pub async fn post_webauthn_auth_finish_login(
     // -> indirect validation through existing code.
 
     let principal = principal.into_inner();
-    let res = webauthn::auth_finish(&req, browser_id, principal.session, payload).await?;
+    let res = webauthn::authenticate::auth_finish(&req, browser_id, principal.session, payload)
+        .await
+        .map_err(|err| {
+            error!("Webauthn Auth Finish error: {err:?}");
+
+            // It's important to forward the 406 as-is. The UI is matching on that status to show
+            // the correctly translated error message. This only happens when the passkey does not
+            // meet attestation requirements.
+            if err.error == ErrorResponseType::NotAccepted {
+                err
+            } else {
+                ErrorResponse::new(
+                    ErrorResponseType::Unauthorized,
+                    "Error during Webauthn auth finish ceremony",
+                )
+            }
+        })?;
     Ok(res.into_response())
 }
 
@@ -1554,7 +1990,12 @@ pub async fn post_webauthn_auth_finish_login(
 ///
 /// **Permissions**
 /// - rauthy_admin
+/// - API key with Users + Delete
+/// - group admin for a user it manages
 /// - authenticated and logged in user for this very {id}
+///
+/// API keys are administrative principals. Any deletion by someone other than the user itself
+/// triggers an informational email to the affected user.
 #[utoipa::path(
     delete,
     path = "/users/{id}/webauthn/delete/{name}",
@@ -1577,45 +2018,37 @@ pub async fn delete_webauthn(
 
     let (id, name) = path.into_inner();
 
-    // Note: Currently, this is not allowed with an ApiKey on purpose.
-    // Access tiers:
-    // - full Rauthy admin: may reset MFA for any user,
-    // - group admin: may reset MFA for a user it manages,
-    // - the user itself: only with a valid `mfa_mod_token`.
-    if principal.validate_admin_session().is_ok() {
-        if principal.is_user(&id).is_err() {
-            warn!("Passkey delete from admin for user {} for key {}", id, name);
-        }
+    let notify_user = if principal.is_user(&id).is_ok() {
+        let Some(token_id) = payload.mfa_mod_token_id else {
+            return Err(ErrorResponse::new(
+                ErrorResponseType::BadRequest,
+                "missing `mfa_mod_token_id`",
+            ));
+        };
+        let token = MfaModToken::find(&token_id).await?;
+        let ip = real_ip_from_req(&req)?;
+        token.validate(principal.user_id()?, ip)?;
+        warn!("Passkey delete for user {} for key {}", id, name);
+        None
     } else {
-        principal.validate_session_auth()?;
-
-        if principal.is_user(&id).is_ok() {
-            // a user deleting its own passkey always needs a valid `mfa_mod_token`
-            let Some(token_id) = payload.mfa_mod_token_id else {
-                return Err(ErrorResponse::new(
-                    ErrorResponseType::BadRequest,
-                    "missing `mfa_mod_token_id`",
-                ));
-            };
-            let token = MfaModToken::find(&token_id).await?;
-            let ip = real_ip_from_req(&req)?;
-            token.validate(principal.user_id()?, ip)?;
-
-            warn!("Passkey delete for user {} for key {}", id, name);
-        } else {
-            // a group admin resetting MFA for a user it manages; the cheap group-admin
-            // check runs before the DB lookup
+        if principal.is_session_group_admin() {
             principal.validate_group_admin_session()?;
-            let target = User::find(id.clone()).await?;
-            principal.validate_group_admin_can_manage(target.roles_iter(), target.groups_iter())?;
-            warn!(
-                "Passkey delete from group admin for user {} for key {}",
-                id, name
-            );
+        } else {
+            principal
+                .validate_api_key_or_admin_session(AccessGroup::Users, AccessRights::Delete)?;
         }
-    }
 
-    PasskeyEntity::delete(id, name).await?;
+        let target = User::find(id.clone()).await?;
+        principal.validate_group_admin_can_manage(target.roles_iter(), target.groups_iter())?;
+        warn!("Passkey delete from admin for user {} for key {}", id, name);
+        Some(target)
+    };
+
+    PasskeyEntity::delete(id, name.clone()).await?;
+
+    if let Some(user) = notify_user {
+        send_email_passkey_removed(&user, &name).await;
+    }
 
     // make sure to delete any existing MFA cookie when a key is deleted
     let cookie = ApiCookie::build(COOKIE_MFA, "", 0);
@@ -1673,7 +2106,7 @@ pub async fn post_webauthn_reg_start(
         let id = id.into_inner();
         principal.is_user(&id)?;
 
-        webauthn::reg_start(id, payload)
+        webauthn::register::reg_start(id, payload)
             .await
             .map(|ccr| HttpResponse::Ok().json(ccr))
     }
@@ -1717,7 +2150,7 @@ pub async fn post_webauthn_reg_finish(
         let id = id.into_inner();
         principal.is_user(&id)?;
 
-        webauthn::reg_finish(id, payload).await?;
+        webauthn::register::reg_finish(id, payload, false).await?;
 
         // The registration ceremony is a fresh proof of possession for this very session, and
         // starting it already required an `MfaModToken`. Upgrade the session in place so the user
@@ -1893,6 +2326,17 @@ pub async fn post_user_password_request_reset(
     let challenge = Pow::validate(&payload.pow)?;
     PowEntity::check_prevent_reuse(challenge.to_string()).await?;
 
+    // Keep password-reset redirects on the configured client allow-list.
+    if let Some(redirect_uri) = &payload.redirect_uri
+        && !RauthyConfig::get()
+            .vars
+            .user_registration
+            .allow_open_redirect
+    {
+        validate_reg_redirect_uri(redirect_uri).await?;
+    }
+    debug!("Reset requested with uri: {:?}", payload.redirect_uri);
+
     match User::find_by_email(payload.email).await {
         Ok(user) => user
             .request_password_reset(payload.redirect_uri)
@@ -1927,6 +2371,11 @@ pub async fn get_user_by_email(
     principal.validate_api_key_or_group_admin(AccessGroup::Users, AccessRights::Read)?;
 
     let user = User::find_by_email(path.into_inner()).await?;
+    // same per-target view gate as get_user_by_id: a group admin only gets the full details of
+    // a user it manages, otherwise this endpoint would leak any user's profile by email.
+    if principal.is_session_group_admin() && principal.user_id() != Ok(user.id.as_str()) {
+        principal.validate_group_admin_can_view(user.roles_iter(), user.groups_iter())?;
+    }
     let values = UserValues::find(&user.id).await?;
 
     Ok(HttpResponse::Ok().json(user.into_response(values)))
@@ -1965,7 +2414,6 @@ pub async fn put_user_by_id(
     }
     .validate()?;
 
-    // cheap auth gate before any DB lookup
     principal.validate_api_key_or_group_admin(AccessGroup::Users, AccessRights::Update)?;
 
     let id = id.into_inner();
@@ -1985,7 +2433,7 @@ pub async fn put_user_by_id(
     )?;
 
     let preferred_username = UserValues::find_preferred_username(&id).await?;
-    handle_put_user_by_id(id, req, payload, preferred_username).await
+    handle_put_user_by_id(id, req, principal, payload, preferred_username).await
 }
 
 /// Modifies a user via a patch operation
@@ -2010,7 +2458,6 @@ pub async fn patch_user(
     principal: ReqPrincipal,
     Json(payload): Json<PatchOp>,
 ) -> Result<HttpResponse, ErrorResponse> {
-    // cheap auth gate before any DB lookup
     principal.validate_api_key_or_group_admin(AccessGroup::Users, AccessRights::Update)?;
 
     let user_id = id.into_inner();
@@ -2059,18 +2506,45 @@ pub async fn patch_user(
         )?;
     }
 
-    handle_put_user_by_id(user_id, req, upd_req, has_preferred_username).await
+    handle_put_user_by_id(user_id, req, principal, upd_req, has_preferred_username).await
 }
 
 #[inline]
 async fn handle_put_user_by_id(
     user_id: String,
     req: HttpRequest,
+    principal: ReqPrincipal,
     payload: UpdateUserRequest,
     preferred_username: Option<String>,
 ) -> Result<HttpResponse, ErrorResponse> {
-    let (user, user_values, is_new_admin) =
-        User::update(user_id, payload, None, preferred_username).await?;
+    let actor_id = principal.user_id();
+    if actor_id.is_err() && principal.api_key.is_none() {
+        return Err(ErrorResponse::new(
+            ErrorResponseType::Forbidden,
+            "No authenticated user or API key for user update",
+        ));
+    }
+    let is_self_update = actor_id == Ok(user_id.as_str());
+    let password_reset_by = if payload.password.is_some() && !is_self_update {
+        Some(match actor_id {
+            Ok(actor_id) => User::find(actor_id.to_string()).await?.email,
+            Err(err) => {
+                let api_key = principal.api_key.as_ref().ok_or(err)?;
+                format!("API key {}", api_key.name)
+            }
+        })
+    } else {
+        None
+    };
+    let (user, user_values, is_new_admin) = User::update(
+        user_id,
+        payload,
+        None,
+        preferred_username,
+        is_self_update,
+        password_reset_by.as_deref(),
+    )
+    .await?;
 
     if is_new_admin {
         RauthyConfig::get()
@@ -2303,11 +2777,8 @@ pub async fn post_user_self_convert_passkey(
 pub async fn get_user_values_config(
     principal: ReqPrincipal,
 ) -> Result<HttpResponse, ErrorResponse> {
-    // There is no need to validate session or API key if the registration is open anyway.
-    // In this case, anyone can pull out the same information from the HTML.
+    // Open registration exposes this config in the registration page.
     if !RauthyConfig::get().vars.user_registration.enable {
-        // a delegated group admin needs this read-only config too: the Admin UI cannot render
-        // the user details view without it
         principal.validate_api_key_or_group_admin(AccessGroup::Users, AccessRights::Read)?;
     }
     Ok(HttpResponse::Ok().json(&RauthyConfig::get().vars.user_values))
@@ -2443,4 +2914,65 @@ pub async fn delete_user_by_id(
     principal.validate_api_key_or_admin_session(AccessGroup::Users, AccessRights::Delete)?;
     let user = User::find(id.into_inner()).await?;
     handle_user_delete(user).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redirect_uri_matches_client;
+
+    #[test]
+    fn test_redirect_uri_matches_client() {
+        // Host-locked prefixes match themselves and continuations at a boundary.
+        assert!(redirect_uri_matches_client(
+            "https://app.example.com",
+            "https://app.example.com"
+        ));
+        assert!(redirect_uri_matches_client(
+            "https://app.example.com/callback?x=1#f",
+            "https://app.example.com"
+        ));
+        assert!(redirect_uri_matches_client(
+            "app.example.com/x",
+            "app.example.com"
+        ));
+        assert!(redirect_uri_matches_client(
+            "https://app.example.com/cb/",
+            "https://app.example.com/cb/"
+        ));
+
+        // Boundary violations must not match.
+        assert!(!redirect_uri_matches_client(
+            "https://app.example.com.evil.com/x",
+            "https://app.example.com"
+        ));
+        assert!(!redirect_uri_matches_client(
+            "https://evil.com/app.example.com/",
+            "https://app.example.com/"
+        ));
+
+        // Degenerate `client_uri`s without a non-empty host must never match, no matter what
+        // the remainder of `redirect_uri` is (open redirect).
+        for bad in ["https://", "http://", "/", "//", "///", "?x=1", "#f", ""] {
+            assert!(
+                !redirect_uri_matches_client("https://evil.com/phish", bad),
+                "client_uri={bad:?}"
+            );
+            assert!(
+                !redirect_uri_matches_client("javascript:alert(1)//x", bad),
+                "client_uri={bad:?}"
+            );
+        }
+
+        // A `javascript:` prefix still locks the final URL to itself (the resolved URL is
+        // unparseable, and the frontend normalizes it before navigating), so only its own
+        // continuations may match.
+        assert!(redirect_uri_matches_client(
+            "javascript:alert(1)//x",
+            "javascript:alert(1)/"
+        ));
+        assert!(!redirect_uri_matches_client(
+            "https://evil.com/phish",
+            "javascript:alert(1)/"
+        ));
+    }
 }

@@ -11,6 +11,8 @@ use rauthy_common::{is_hiqlite, password_hasher};
 use rauthy_data::ListenScheme;
 use rauthy_data::database::{Cache, DB};
 use rauthy_data::email::mailer;
+use rauthy_data::email::mailer::EMail;
+use rauthy_data::email::mailer_callback::EMailCallback;
 use rauthy_data::entity;
 use rauthy_data::entity::pictures::UserPicture;
 use rauthy_data::events::health_watch::watch_health;
@@ -32,10 +34,9 @@ use std::cmp::max;
 use std::error::Error;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
-use std::thread;
 use std::time::Duration;
+use std::{env, thread};
 use tokio::sync::mpsc;
-
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
@@ -44,7 +45,15 @@ pub async fn run(
     secrets_file: String,
     test_mode: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let (tx_email, rx_email) = mpsc::channel::<mailer::EMail>(16);
+    #[cfg(debug_assertions)]
+    if !RAUTHY_VERSION.starts_with("0.37.") {
+        todo!("Remove the env set var for temporary hiqlite migrations");
+    }
+    // We will set this var automatically. Rauthy does not depend on the cache being persistent.
+    // Only for other people using Hiqlite, this must be an opt-in step, just in case.
+    unsafe { env::set_var("HQL_CACHE_WAL_AUTO_MIGRATE", "true") };
+
+    let (tx_email, rx_email) = mpsc::channel::<(EMail, EMailCallback)>(16);
     let (tx_events, rx_events) = flume::unbounded();
     let (tx_events_router, rx_events_router) = flume::unbounded();
 
@@ -58,7 +67,7 @@ pub async fn run(
     )
     .await?;
     rauthy_config.init_static();
-    init_static_vars::trigger();
+    init_static_vars::trigger().await;
 
     if !logging::is_log_fmt_json() {
         println!(
@@ -106,8 +115,17 @@ pub async fn run(
     debug!("Starting Password Hasher");
     tokio::spawn(password_hasher::run());
 
+    debug!("Waiting for Raft-Node to be in sync with the cluster");
+    if let Err(err) = DB::hql()
+        .wait_for_cluster_sync_timeout(Duration::from_secs(30))
+        .await
+    {
+        // This should never happen in reality. Syncs should even be done in ms rather than seconds.
+        error!("Waiting for Raft-cluster sync timed out: {err}");
+    }
+
     debug!("Applying database migrations");
-    DB::migrate().await.expect("Database migration error");
+    let previous_db_version = DB::migrate().await.expect("Database migration error");
 
     // Нативная сидка consent-документов (bootstrap/consents.json) — таблицы уже есть.
     rauthy_consents::bootstrap()
@@ -126,7 +144,9 @@ pub async fn run(
     tokio::spawn(watch_health());
 
     // Loop, because you could get into a race condition when recovery a HA Leader after lost volume
-    while let Err(err) = version_migration::manual_version_migrations().await {
+    while let Err(err) =
+        version_migration::manual_version_migrations(previous_db_version.clone()).await
+    {
         error!("Error during version migration: {err:?}");
         time::sleep(Duration::from_secs(1)).await;
     }
@@ -265,7 +285,20 @@ async fn server_with_metrics() -> std::io::Result<()> {
             // for blacklisted IPs -> middlewares are executed in reverse order -> this one first
             .wrap(RauthyIpBlacklistMiddleware)
             .service(api_services())
-            .service(generic::catch_all);
+            // Register the catch-all for every standard HTTP method, so that non-GET scan
+            // requests (POST/PUT/...) are also caught by the pre-blacklisting in `catch_all`
+            // instead of just receiving a 405 Method Not Allowed.
+            .service(
+                web::resource("/{_:.*}")
+                    .route(web::get().to(generic::catch_all))
+                    .route(web::post().to(generic::catch_all))
+                    .route(web::put().to(generic::catch_all))
+                    .route(web::delete().to(generic::catch_all))
+                    .route(web::head().to(generic::catch_all))
+                    // no `web::options()` helper exists in actix-web, use the generic method route
+                    .route(web::method(actix_web::http::Method::OPTIONS).to(generic::catch_all))
+                    .route(web::patch().to(generic::catch_all)),
+            );
 
         #[cfg(not(target_os = "windows"))]
         if matches!(
@@ -352,7 +385,20 @@ async fn server_without_metrics() -> std::io::Result<()> {
             // for blacklisted IPs -> middlewares are executed in reverse order -> this one first
             .wrap(RauthyIpBlacklistMiddleware)
             .service(api_services())
-            .service(generic::catch_all);
+            // Register the catch-all for every standard HTTP method, so that non-GET scan
+            // requests (POST/PUT/...) are also caught by the pre-blacklisting in `catch_all`
+            // instead of just receiving a 405 Method Not Allowed.
+            .service(
+                web::resource("/{_:.*}")
+                    .route(web::get().to(generic::catch_all))
+                    .route(web::post().to(generic::catch_all))
+                    .route(web::put().to(generic::catch_all))
+                    .route(web::delete().to(generic::catch_all))
+                    .route(web::head().to(generic::catch_all))
+                    // no `web::options()` helper exists in actix-web, use the generic method route
+                    .route(web::method(actix_web::http::Method::OPTIONS).to(generic::catch_all))
+                    .route(web::patch().to(generic::catch_all)),
+            );
 
         #[cfg(not(target_os = "windows"))]
         if matches!(
@@ -575,6 +621,7 @@ fn api_services() -> actix_web::Scope {
                 .service(clients::put_clients_dyn)
                 .service(clients::get_forward_auth_oidc)
                 .service(clients::get_forward_auth_callback)
+                .service(clients::post_client_validate_uri)
                 .service(generic::get_login_time)
                 .service(fed_cm::get_fed_cm_accounts)
                 .service(fed_cm::get_fed_cm_config)
@@ -708,7 +755,14 @@ fn api_services() -> actix_web::Scope {
                 .service(generic::get_ready)
                 .service(swagger_ui::get_openapi_doc)
                 .service(swagger_ui::get_swagger_ui)
-                .service(html::get_static_assets),
+                .service(users::get_user_otps)
+                .service(users::post_user_otp)
+                .service(users::put_user_otp)
+                .service(users::delete_user_otp)
+                .service(users::post_otp_auth_start_login)
+                .service(users::post_otp_auth_resend)
+                .service(users::post_otp_auth_finish_login)
+                .service(html::get_static_assets), // catch-all GET routes
         )
 }
 

@@ -2,6 +2,13 @@ set shell := ["bash", "-uc"]
 
 export TAG := `cat Cargo.toml | grep '^version =' | cut -d " " -f3 | xargs`
 
+# Allows overwriting a dependency version if we pin it specifically.
+export CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE := 'allow'
+
+[private]
+default:
+    @just --list
+
 # prints out the currently set version
 version:
     #!/usr/bin/env bash
@@ -18,6 +25,9 @@ clippy-examples:
     cd ../axum
     cargo +nightly clippy -- -D warnings
 
+    cd ../device-code
+    cargo +nightly clippy -- -D warnings
+
     cd ../generic
     cargo +nightly clippy -- -D warnings
 
@@ -28,19 +38,20 @@ check: clippy-examples
     clear
     cargo update
 
-    cargo +nightly clippy -- -D warnings
-    cargo +nightly clippy --features actix-web -- -D warnings
-    cargo +nightly clippy --features axum -- -D warnings
-    cargo +nightly clippy --features device-code -- -D warnings
-    cargo +nightly clippy --features userinfo -- -D warnings
-    cargo +nightly clippy --features scim -- -D warnings
-    cargo +nightly clippy --features rsa -- -D warnings
+    cargo clippy -- -D warnings
+    cargo clippy --features actix-web -- -D warnings
+    cargo clippy --features axum -- -D warnings
+    cargo clippy --features device-code -- -D warnings
+    cargo clippy --features userinfo -- -D warnings
+    cargo clippy --features scim -- -D warnings
+    cargo clippy --features rsa -- -D warnings
 
     cargo minimal-versions check
     cargo minimal-versions check --features actix-web
     cargo minimal-versions check --features axum
     cargo minimal-versions check --features device-code
     cargo minimal-versions check --features userinfo
+    cargo minimal-versions check --features scim
     cargo minimal-versions check --features scim,axum
     cargo minimal-versions check --features rsa
 
