@@ -78,7 +78,7 @@ pub async fn get_authorize(
     req: HttpRequest,
     accept_encoding: web::Header<header::AcceptEncoding>,
     browser_id: BrowserId,
-    Query(params): Query<Option<AuthRequest>>,
+    params: Option<Query<AuthRequest>>,
     principal: ReqPrincipal,
 ) -> Result<HttpResponse, ErrorResponse> {
     // The unified login/register page can be opened without any OIDC client params
@@ -87,7 +87,7 @@ pub async fn get_authorize(
     // challenge when submitting the login form. Keeping `AuthRequest` in its upstream
     // shape (non-optional fields) minimizes the merge surface on every upstream sync.
     let is_default_mode = params.is_none();
-    let params = params.unwrap_or_else(|| AuthRequest {
+    let params = params.map(|q| q.into_inner()).unwrap_or_else(|| AuthRequest {
         client_id: String::from("rauthy"),
         redirect_uri: format!("{}oidc/callback", RauthyConfig::get().issuer),
         response_type: String::from("code"),
