@@ -5,10 +5,18 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 description.workspace = true
+default-run = "rauthy"
 
 [features]
 default = ["jemalloc"]
 jemalloc = ["dep:tikv-jemallocator"]
+
+profiling = []
+
+# Offline tool that regenerates the shipped FIDO MDS dataset. Not built into the server image.
+[[bin]]
+name = "fido-mds-prep"
+path = "src/fido_mds_prep.rs"
 
 [dependencies]
 rauthy-common = { path = "../common" }
@@ -25,6 +33,7 @@ actix-web = { workspace = true }
 actix-web-prom = { workspace = true }
 argon2 = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 cidr = { workspace = true }
 clap = { workspace = true }
 colored = { workspace = true }
@@ -40,6 +49,7 @@ reqwest = { workspace = true }
 rpassword = { workspace = true }
 rustls = { workspace = true }
 s3-simple = { workspace = true }
+semver = { workspace = true }
 serde_json = { workspace = true }
 spow = { workspace = true }
 time = { workspace = true }

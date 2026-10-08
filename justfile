@@ -5,6 +5,7 @@ export TAG := `cat Cargo.toml | grep '^version =' | cut -d " " -f3 | xargs`
 export TODAY := `date +%Y%m%d`
 export DEV_HOST := `echo ${PUB_URL:-localhost:8080} | cut -d':' -f1`
 export USER := `echo "$(id -u):$(id -g)"`
+
 arch := if arch() == "x86_64" { "amd64" } else { "arm64" }
 is_mac_container := `if test -f /usr/local/bin/container; then echo true; else echo false; fi`
 docker := `which docker || which podman || which container || echo 'no-container-runtime-found'`
@@ -42,6 +43,9 @@ setup:
 
     echo "Building WASM modules"
     just build-wasm
+
+    echo "Fetching the FIDO MDS dataset"
+    just fido-mds-prep
 
 # start the backend containers for local dev
 @dev-env-start:
@@ -131,7 +135,7 @@ nginx-start:
     #!/usr/bin/env bash
     set -euxo pipefail
 
-    rm assets/nginx/access.log
+    test -f assets/nginx/access.log && rm assets/nginx/access.log
     touch assets/nginx/access.log
 
     {{ docker }} run -it --rm \
@@ -155,6 +159,13 @@ clippy:
     set -euxo pipefail
     clear
     cargo clippy
+
+# fetch the FIDO MDS dataset from the live metadata service into the embedded asset
+fido-mds-prep source="https://mds.fidoalliance.org/" out="assets/fido_mds/dataset.bin":
+    #!/usr/bin/env bash
+    set -euxo pipefail
+
+    cargo run --bin fido-mds-prep -- --source {{ source }} --out {{ out }}
 
 # delete the local hiqlite database
 delete-hiqlite:
@@ -219,14 +230,17 @@ test-backend-heaptrack: test-backend-stop delete-hiqlite
     #!/usr/bin/env bash
     set -euxo pipefail
     clear
-    echo "Building a release build with the 'profiling' profile - this will take some time ..."
-    RUSTFLAGS=-g cargo build --profile profiling
+    #RUSTFLAGS=-g cargo build --profile profiling --features profiling
+    RUSTFLAGS="--cfg tokio_unstable -C force-frame-pointers=yes" cargo build --profile profiling --features profiling
     #echo "Temporarily removing kernel hardening and elevating ptrace rights until reboot"
     #echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
     #echo 'grant temporary access to performance events until reboot'
     #echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
+    # samply currently needs: echo '-1' | sudo tee /proc/sys/kernel/perf_event_paranoid
     #echo 'if you get an mmap error, try: sudo sysctl kernel.perf_event_mlock_kb=2048'
     {{ test_env_vars }} heaptrack ./target/profiling/rauthy serve -c config-test.toml --test
+    #{{ test_env_vars }} samply record ./target/profiling/dorn -w 4
+
 
 # stops a possibly running test backend that may have spawned in the background for integration tests
 test-backend-stop:
@@ -374,6 +388,7 @@ build-wasm:
     wasm-pack build -d ../../frontend/src/wasm/md --no-pack --out-name md --features md
 
 # Build the final container image.
+#build image="ghcr.io/sebadob/rauthy" push="push": build-wasm build-ui fido-mds-prep
 build image="ghcr.io/sebadob/rauthy" push="push": build-wasm build-ui
     #!/usr/bin/env bash
     set -euxo pipefail
@@ -523,7 +538,14 @@ update:
         exit 1
     fi
     cargo +nightly update
+    #CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo +nightly update
+
+    # We always want the latest versions of crates we control
+    cargo update hiqlite cryptr s3-simple spow tls-hot-reload
 
     cd frontend
     # min release is set via `frontend/.npmrc`
     {{ npm }} update
+
+update-precise package="" version="":
+    CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update {{ package }} --precise {{ version }}

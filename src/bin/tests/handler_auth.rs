@@ -1,14 +1,15 @@
 use crate::common::{
-    CLIENT_ID, CLIENT_SECRET, PASSWORD, USERNAME, check_status, code_state_from_headers,
-    cookie_csrf_headers_from_res, get_auth_headers, get_backend_url, get_solved_pow,
-    init_client_bcl_uri,
+    CLIENT_ID, CLIENT_SECRET, PASSWORD, USERNAME, authorization_response_params,
+    authorization_response_params_decoded, check_status, code_state_from_headers,
+    cookie_csrf_headers_from_res, decode_claims, get_auth_headers, get_backend_url, get_issuer,
+    get_solved_pow, init_client_bcl_uri,
 };
 use actix_web::{App, HttpResponse, HttpServer, http, web};
 use chrono::Utc;
 use ed25519_compact::Noise;
 use josekit::jwk;
 use pretty_assertions::assert_eq;
-use rauthy_api_types::clients::UpdateClientRequest;
+use rauthy_api_types::clients::{ClientResponse, NewClientRequest, UpdateClientRequest};
 use rauthy_api_types::oidc::{
     GrantType, JktClaim, JwkKeyPairAlg, LoginRequest, TokenInfo, TokenRequest,
     TokenRevocationRequest, TokenValidationRequest,
@@ -35,6 +36,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time;
 
 mod common;
+
+/// a `state` that would inject its own `iss` if the server did not encode it
+const INJECTING_STATE: &str = "orig&iss=https://attacker.example.com/";
+const INJECTING_STATE_ENC: &str = "orig%26iss%3Dhttps%3A%2F%2Fattacker.example.com%2F";
+/// `init_client` requires PKCE - without a challenge, `/authorize` would fail for another reason
+const CHALLENGE_PLAIN: &str = "oDXug9zfYqfz8ejcqMpALRPXfW8QhbKV2AVuScAt8xrLKDAmaRYQ4yRi2uqcH9ys";
 
 // This is a very long running test - run it manually as a single test
 // maybe moving it into its own module would work, so it does not block the others
@@ -73,6 +80,246 @@ async fn test_certs() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// RFC 9207 - the `error=login_required` redirect must carry `state` and exactly one `iss`
+#[tokio::test]
+async fn test_authorize_prompt_none_without_session() -> Result<(), Box<dyn Error>> {
+    let redirect_uri = "http://localhost:3000/oidc/callback";
+    let url = format!(
+        "{}/oidc/authorize?client_id=init_client&redirect_uri={}&response_type=code&code_challenge={}&prompt=none&state={}",
+        get_backend_url(),
+        redirect_uri,
+        CHALLENGE_PLAIN,
+        INJECTING_STATE_ENC,
+    );
+    let res = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?
+        .get(&url)
+        .send()
+        .await?;
+    assert_eq!(res.status(), 302);
+
+    let params = authorization_response_params(&res)?;
+    assert!(
+        params
+            .iter()
+            .any(|(k, v)| k == "error" && v == "login_required")
+    );
+    assert_eq!(params.iter().filter(|(k, _)| k == "iss").count(), 1);
+    assert!(!params.iter().any(|(k, _)| k == "code"));
+
+    let decoded = authorization_response_params_decoded(&res)?;
+    assert_eq!(decoded.iter().filter(|(k, _)| k == "iss").count(), 1);
+    assert!(
+        decoded
+            .iter()
+            .any(|(k, v)| k == "iss" && v == &format!("{}/", get_issuer()))
+    );
+    assert!(
+        decoded
+            .iter()
+            .any(|(k, v)| k == "state" && v == INJECTING_STATE)
+    );
+
+    Ok(())
+}
+
+/// Creates (or re-creates) a public client with the wildcard redirect_uri
+/// `{backend_url}/wildcard/*`, so that the prefix match alone would accept every URI below it.
+async fn wildcard_redirect_client(client_id: &str) -> Result<String, Box<dyn Error>> {
+    let backend_url = get_backend_url();
+    let auth_headers = get_auth_headers().await?;
+    let client = reqwest::Client::new();
+
+    // ignore the result - only needed when the test runs against a used backend
+    let _ = client
+        .delete(format!("{backend_url}/clients/{client_id}"))
+        .headers(auth_headers.clone())
+        .send()
+        .await?;
+
+    let wildcard = format!("{backend_url}/wildcard/");
+    let res = client
+        .post(format!("{backend_url}/clients"))
+        .headers(auth_headers)
+        .json(&NewClientRequest {
+            id: client_id.to_string(),
+            secret: None,
+            name: None,
+            confidential: false,
+            redirect_uris: vec![format!("{wildcard}*")],
+            post_logout_redirect_uris: None,
+        })
+        .send()
+        .await?;
+    check_status(res, 200).await?;
+
+    Ok(wildcard)
+}
+
+fn challenge_s256() -> String {
+    base64_url_encode(digest::digest(&digest::SHA256, CHALLENGE_PLAIN.as_bytes()).as_ref())
+}
+
+fn authorize_url_s256(client_id: &str, redirect_uri: &str, extra: &str) -> String {
+    let challenge_s256 = challenge_s256();
+    let mut url = reqwest::Url::parse(&format!("{}/oidc/authorize", get_backend_url())).unwrap();
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("response_type", "code")
+        .append_pair("code_challenge", &challenge_s256)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", "X");
+    format!("{url}{extra}")
+}
+
+// With a wildcard registration, the prefix match alone would accept all of these.
+#[tokio::test]
+async fn test_authorize_rejects_reserved_query_key_in_redirect_uri() -> Result<(), Box<dyn Error>> {
+    let client_id = "redirect-wildcard-query";
+    let wildcard = wildcard_redirect_client(client_id).await?;
+    let good_redirect_uri = format!("{wildcard}cb?foo=bar");
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+
+    // the same URI without a reserved key is accepted
+    let res = client
+        .get(authorize_url_s256(client_id, &good_redirect_uri, ""))
+        .send()
+        .await?;
+    check_status(res, 200).await?;
+
+    for (bad_redirect_uri, _reserved) in [
+        (format!("{good_redirect_uri}&iss=x"), "iss"),
+        (format!("{good_redirect_uri}&code=x"), "code"),
+        (format!("{good_redirect_uri}&state"), "state"),
+        (format!("{good_redirect_uri}&code%5B%5D=x"), "code"),
+        (
+            format!("{good_redirect_uri}&error.description=x"),
+            "error_description",
+        ),
+    ] {
+        for prompt in ["", "&prompt=none"] {
+            let res = client
+                .get(authorize_url_s256(client_id, &bad_redirect_uri, prompt))
+                .send()
+                .await?;
+            assert_eq!(res.status(), 400, "{bad_redirect_uri} / prompt: '{prompt}'");
+            assert!(res.headers().get(reqwest::header::LOCATION).is_none());
+            let body = res.text().await?;
+            assert!(body.contains("`redirect_uri` must not contain reserved query param"));
+        }
+    }
+
+    // POST must stay a uniform 401 for correct and wrong password - no enumeration oracle
+    let res = client
+        .get(authorize_url_s256(client_id, &good_redirect_uri, ""))
+        .send()
+        .await?;
+    let res = check_status(res, 200).await?;
+    let headers = cookie_csrf_headers_from_res(res).await?;
+    let url_auth = format!("{}/oidc/authorize", get_backend_url());
+
+    let login = |password: &str, redirect_uri: &str| LoginRequest {
+        email: Some(USERNAME.to_string()),
+        password: Some(password.to_string()),
+        pow: String::new(),
+        client_id: client_id.to_string(),
+        redirect_uri: redirect_uri.to_string(),
+        scopes: None,
+        state: Some("X".to_string()),
+        nonce: None,
+        code_challenge: Some(challenge_s256()),
+        code_challenge_method: Some("S256".to_string()),
+        resource: None,
+        resident_key_token: None,
+        fwda: None,
+    };
+
+    let bad_redirect_uri = format!("{good_redirect_uri}&iss=x");
+    for password in [PASSWORD, "IAmSoWrong1337"] {
+        let mut req_login = login(password, &bad_redirect_uri);
+        req_login.pow = get_solved_pow().await;
+        let res = client
+            .post(&url_auth)
+            .headers(headers.clone())
+            .json(&req_login)
+            .send()
+            .await?;
+        let status = res.status();
+        let body = res.text().await?;
+        assert_eq!(status, 401, "expected uniform 401 - body: {body}");
+        assert!(body.contains("Invalid user credentials"), "{body}");
+        assert!(!body.contains("iss"), "{body}");
+    }
+
+    // the same login without the reserved key succeeds
+    let mut req_login = login(PASSWORD, &good_redirect_uri);
+    req_login.pow = get_solved_pow().await;
+    let res = client
+        .post(&url_auth)
+        .headers(headers)
+        .json(&req_login)
+        .send()
+        .await?;
+    let res = check_status(res, 202).await?;
+    let location = res
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .unwrap()
+        .to_str()?;
+    assert!(
+        location.starts_with(&format!("{good_redirect_uri}&code=")),
+        "{location}"
+    );
+    let decoded = authorization_response_params_decoded(&res)?;
+    assert_eq!(decoded.iter().filter(|(k, _)| k == "iss").count(), 1);
+    assert_eq!(decoded.iter().filter(|(k, _)| k == "code").count(), 1);
+
+    Ok(())
+}
+
+// RFC 6749 §3.1.2 - a fragment would swallow `code` / `iss`, and the wildcard would let it through
+#[tokio::test]
+async fn test_authorize_rejects_fragment_in_redirect_uri() -> Result<(), Box<dyn Error>> {
+    let client_id = "redirect-wildcard-fragment";
+    let wildcard = wildcard_redirect_client(client_id).await?;
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+
+    let res = client
+        .get(authorize_url_s256(client_id, &format!("{wildcard}cb"), ""))
+        .send()
+        .await?;
+    assert_eq!(res.status().as_u16(), 200);
+
+    for bad_redirect_uri in [
+        format!("{wildcard}cb#/callback?iss=https%3A%2F%2Fattacker.example%2F"),
+        format!("{wildcard}cb#"),
+    ] {
+        for prompt in ["", "&prompt=none"] {
+            let res = client
+                .get(authorize_url_s256(client_id, &bad_redirect_uri, prompt))
+                .send()
+                .await?;
+            assert_eq!(res.status(), 400, "{bad_redirect_uri} / prompt: '{prompt}'");
+            assert!(res.headers().get(reqwest::header::LOCATION).is_none());
+            let body = res.text().await?;
+            assert!(
+                body.contains("`redirect_uri` must not contain any of: # ,"),
+                "{body}"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_authorization_code_flow() -> Result<(), Box<dyn Error>> {
     let backend_url = get_backend_url();
@@ -99,17 +346,19 @@ async fn test_authorization_code_flow() -> Result<(), Box<dyn Error>> {
     // Step 2: POST /authorize with CSRF token cookie
     let nonce = get_rand(32);
     let mut req_login = LoginRequest {
-        email: USERNAME.to_string(),
+        email: Some(USERNAME.to_string()),
         password: Some("IAmSoWrong1337".to_string()),
         pow: get_solved_pow().await,
         client_id: CLIENT_ID.to_string(),
         redirect_uri: redirect_uri.to_owned(),
         scopes: None,
-        state: None,
+        state: Some(INJECTING_STATE.to_string()),
         nonce: Some(nonce.to_owned()),
         code_challenge: Some(challenge_plain.to_owned()),
         code_challenge_method: Some("plain".to_string()),
         resource: None,
+        resident_key_token: None,
+        fwda: None,
     };
     let res = reqwest::Client::new()
         .post(&url_auth)
@@ -131,6 +380,18 @@ async fn test_authorization_code_flow() -> Result<(), Box<dyn Error>> {
     res = check_status(res, 202).await?;
 
     // Step 3: extract values from callback location header
+    let decoded = authorization_response_params_decoded(&res)?;
+    assert_eq!(decoded.iter().filter(|(k, _)| k == "iss").count(), 1);
+    assert!(
+        decoded
+            .iter()
+            .any(|(k, v)| k == "iss" && v == &format!("{}/", get_issuer()))
+    );
+    assert!(
+        decoded
+            .iter()
+            .any(|(k, v)| k == "state" && v == INJECTING_STATE)
+    );
     let (code, _) = code_state_from_headers(res)?;
     println!("Extracted code: {:?}", code);
 
@@ -152,6 +413,18 @@ async fn test_authorization_code_flow() -> Result<(), Box<dyn Error>> {
     // should be 400 - no code verifier given
     check_status(res, 400).await?;
 
+    // each failed attempt invalidates the auth code, we need to re-fetch
+    req_login.pow = get_solved_pow().await;
+    let res = reqwest::Client::new()
+        .post(&url_auth)
+        .headers(headers.clone())
+        .json(&req_login)
+        .send()
+        .await?;
+    assert_eq!(res.status(), 202);
+    let (code, _) = code_state_from_headers(res)?;
+    req_token.code = Some(code);
+
     req_token.code_verifier = Some("IAmSoWrong1337".to_string());
     let res = reqwest::Client::new()
         .post(&url_token)
@@ -159,20 +432,36 @@ async fn test_authorization_code_flow() -> Result<(), Box<dyn Error>> {
         .send()
         .await?;
     // should be 401 - wrong code verifier given
-    check_status(res, 401).await?;
+    assert_eq!(res.status(), 401);
+
+    // each failed attempt invalidates the auth code, we need to re-fetch
+    req_login.pow = get_solved_pow().await;
+    let res = reqwest::Client::new()
+        .post(&url_auth)
+        .headers(headers.clone())
+        .json(&req_login)
+        .send()
+        .await?;
+    assert_eq!(res.status(), 202);
+    let (code, _) = code_state_from_headers(res)?;
+    req_token.code = Some(code);
 
     req_token.code_verifier = Some(challenge_plain.to_string());
-    let mut res = reqwest::Client::new()
+    let res = reqwest::Client::new()
         .post(&url_token)
         .form(&req_token)
         .send()
         .await?;
-    res = check_status(res, 200).await?;
+    assert_eq!(res.status(), 200);
     let ts = res.json::<TokenSet>().await?;
-    assert!(ts.access_token.len() > 0);
+    assert!(!ts.access_token.is_empty());
     assert!(ts.id_token.is_some());
     assert!(ts.refresh_token.is_some());
     assert_eq!(ts.expires_in, 60);
+    let scope = ts.scope.as_deref().expect("scope in token response");
+    assert!(scope.split_whitespace().any(|s| s == "openid"));
+    let access_claims = decode_claims(&ts.access_token);
+    assert_eq!(ts.scope.as_deref(), access_claims["scope"].as_str());
 
     // verify 'nonce' existing in id token
     let id_token = ts.id_token.unwrap();
@@ -183,6 +472,20 @@ async fn test_authorization_code_flow() -> Result<(), Box<dyn Error>> {
         .claim("kid")
         .map(|v| v.to_string().replace('\"', ""))
         .unwrap();
+
+    // an ID token uses the generic `JWT`, while an access token must use `at+jwt` (RFC 9068)
+    let typ = header
+        .claim("typ")
+        .map(|v| v.to_string().replace('\"', ""))
+        .expect("'typ' is not set in id token header");
+    assert_eq!(typ, "JWT");
+
+    let access_header = josekit::jwt::decode_header(ts.access_token.clone())?;
+    let access_typ = access_header
+        .claim("typ")
+        .map(|v| v.to_string().replace('\"', ""))
+        .expect("'typ' is not set in access token header");
+    assert_eq!(access_typ, "at+jwt");
 
     // retrieve jwk for kid
     let kid_url = format!("{}/oidc/certs/{}", backend_url, kid);
@@ -215,6 +518,7 @@ async fn test_authorization_code_flow() -> Result<(), Box<dyn Error>> {
     let challenge_s256 = base64_url_encode(hash.as_ref());
     req_login.code_challenge_method = Some("S256".to_string());
     req_login.code_challenge = Some(challenge_s256);
+    req_login.state = None;
     req_login.pow = get_solved_pow().await;
     let mut res = reqwest::Client::new()
         .post(&url_auth)
@@ -243,7 +547,7 @@ async fn test_authorization_code_flow() -> Result<(), Box<dyn Error>> {
     res = check_status(res, 200).await?;
 
     let ts = res.json::<TokenSet>().await?;
-    assert!(ts.access_token.len() > 0);
+    assert!(!ts.access_token.is_empty());
     assert!(ts.id_token.is_some());
     assert!(ts.refresh_token.is_some());
     assert_eq!(ts.expires_in, 60);
@@ -340,7 +644,7 @@ async fn test_authorization_code_flow() -> Result<(), Box<dyn Error>> {
     res = check_status(res, 200).await?;
 
     let ts = res.json::<TokenSet>().await?;
-    assert!(ts.access_token.len() > 0);
+    assert!(!ts.access_token.is_empty());
     assert!(ts.id_token.is_some());
     assert!(ts.refresh_token.is_some());
     assert_eq!(ts.expires_in, 60);
@@ -378,12 +682,26 @@ async fn test_client_credentials_flow() -> Result<(), Box<dyn Error>> {
     res = check_status(res, 200).await?;
 
     let ts = res.json::<TokenSet>().await?;
-    assert!(ts.access_token.len() > 0);
+    assert!(!ts.access_token.is_empty());
     assert_eq!(ts.token_type, JwtTokenType::Bearer);
     assert_eq!(ts.expires_in, 60);
     // important: no id token for client_credentials and not refresh token
     assert!(ts.id_token.is_none());
     assert!(ts.refresh_token.is_none());
+
+    // client_credentials always grants the client's `default_scopes`
+    assert!(ts.scope.is_some());
+    let res = client
+        .get(format!("{}/clients/{}", backend_url, CLIENT_ID))
+        .headers(get_auth_headers().await?)
+        .send()
+        .await?;
+    let res = check_status(res, 200).await?;
+    let client_res = res.json::<ClientResponse>().await?;
+    let default_scopes = client_res.default_scopes.join(" ");
+    assert_eq!(ts.scope.as_deref(), Some(default_scopes.as_str()));
+    let access_claims = decode_claims(&ts.access_token);
+    assert_eq!(ts.scope.as_deref(), access_claims["scope"].as_str());
 
     validate_token(ts.access_token.clone(), None).await?;
 
@@ -419,7 +737,7 @@ async fn test_concurrent_logins() -> Result<(), Box<dyn Error>> {
 
     // Step 2: POST /authorize with CSRF token cookie
     let mut req_login = LoginRequest {
-        email: USERNAME.to_string(),
+        email: Some(USERNAME.to_string()),
         password: Some("IAmSoWrong1337".to_string()),
         pow: get_solved_pow().await,
         client_id: CLIENT_ID.to_string(),
@@ -430,6 +748,8 @@ async fn test_concurrent_logins() -> Result<(), Box<dyn Error>> {
         code_challenge: Some(challenge_plain.to_owned()),
         code_challenge_method: None,
         resource: None,
+        resident_key_token: None,
+        fwda: None,
     };
 
     let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -518,13 +838,16 @@ async fn test_password_flow() -> Result<(), Box<dyn Error>> {
     res = check_status(res, 200).await?;
 
     let ts = res.json::<TokenSet>().await?;
-    assert!(ts.access_token.len() > 0);
+    assert!(!ts.access_token.is_empty());
     assert!(ts.id_token.is_some());
-    assert!(ts.id_token.as_ref().unwrap().len() > 0);
+    assert!(!ts.id_token.as_ref().unwrap().is_empty());
     assert!(ts.refresh_token.is_some());
-    assert!(ts.refresh_token.as_ref().unwrap().len() > 0);
+    assert!(!ts.refresh_token.as_ref().unwrap().is_empty());
     // test token is valid for only 60 seconds to make the refresh token valid immediately
     assert_eq!(ts.expires_in, 60);
+    let claims = decode_claims(&ts.access_token);
+    assert!(ts.scope.is_some());
+    assert_eq!(ts.scope.as_deref(), claims["scope"].as_str());
 
     // validate against the backend
     validate_token(ts.access_token.to_owned(), None).await?;
@@ -550,12 +873,15 @@ async fn test_password_flow() -> Result<(), Box<dyn Error>> {
     let res = reqwest::Client::new().post(&url).form(&req).send().await?;
     assert_eq!(res.status(), 200);
     let new_ts = res.json::<TokenSet>().await?;
-    assert!(new_ts.access_token.len() > 0);
+    assert!(!new_ts.access_token.is_empty());
     assert!(new_ts.id_token.is_some());
-    assert!(new_ts.id_token.as_ref().unwrap().len() > 0);
+    assert!(!new_ts.id_token.as_ref().unwrap().is_empty());
     assert!(new_ts.refresh_token.is_some());
-    assert!(new_ts.refresh_token.as_ref().unwrap().len() > 0);
+    assert!(!new_ts.refresh_token.as_ref().unwrap().is_empty());
     assert_eq!(new_ts.expires_in, 60);
+    let new_claims = decode_claims(&new_ts.access_token);
+    assert!(new_ts.scope.is_some());
+    assert_eq!(new_ts.scope.as_deref(), new_claims["scope"].as_str());
 
     assert_ne!(ts.refresh_token, new_ts.refresh_token);
     assert_ne!(ts.access_token, new_ts.access_token);
@@ -644,6 +970,26 @@ async fn test_dpop() -> Result<(), Box<dyn Error>> {
         .to_str()
         .unwrap();
     println!("nonce we should use: {}", nonce);
+
+    // A nonce the server never issued must be answered like a missing one. `latest` is the
+    // cache key under which the current nonce is also stored, and must not pass either.
+    for forged in ["never-issued-by-this-server", "latest"] {
+        claims.nonce = Some(forged.to_string());
+        let claims_json = serde_json::to_string(&claims).unwrap();
+        let claims_b64 = base64_url_no_pad_encode(claims_json.as_bytes());
+        let mut forged_token = format!("{}.{}", header_b64, claims_b64);
+        let sig = kp.sk.sign(&forged_token, Some(Noise::generate()));
+        write!(forged_token, ".{}", base64_url_no_pad_encode(sig.as_ref())).unwrap();
+
+        let res = client
+            .post(&url)
+            .header(TOKEN_DPOP, &forged_token)
+            .form(&body)
+            .send()
+            .await?;
+        assert_eq!(res.status(), 400, "nonce '{forged}' was accepted");
+        assert!(res.headers().get(HEADER_DPOP_NONCE).is_some());
+    }
 
     // insert the nonce and rebuild
     claims.nonce = Some(nonce.to_string());
@@ -757,7 +1103,7 @@ async fn test_auth_code_flow_ephemeral_client() -> Result<(), Box<dyn Error>> {
     // login and get an authorization code
     let nonce = get_rand(32);
     let req_login = LoginRequest {
-        email: USERNAME.to_string(),
+        email: Some(USERNAME.to_string()),
         password: Some(PASSWORD.to_string()),
         pow: get_solved_pow().await,
         client_id: client_id.to_string(),
@@ -768,6 +1114,8 @@ async fn test_auth_code_flow_ephemeral_client() -> Result<(), Box<dyn Error>> {
         code_challenge: Some(challenge_s256),
         code_challenge_method: Some("S256".to_string()),
         resource: None,
+        resident_key_token: None,
+        fwda: None,
     };
     let res = client
         .post(&url_auth)
@@ -795,7 +1143,7 @@ async fn test_auth_code_flow_ephemeral_client() -> Result<(), Box<dyn Error>> {
     assert!(res.status().is_success());
 
     let ts = res.json::<TokenSet>().await?;
-    assert!(ts.access_token.len() > 0);
+    assert!(!ts.access_token.is_empty());
     assert!(ts.id_token.is_some());
     assert!(ts.refresh_token.is_some());
     assert_eq!(ts.expires_in, 60);
@@ -812,7 +1160,7 @@ async fn test_auth_code_flow_ephemeral_client() -> Result<(), Box<dyn Error>> {
     assert!(res.status().is_success());
 
     let new_ts = res.json::<TokenSet>().await?;
-    assert!(ts.access_token.len() > 0);
+    assert!(!ts.access_token.is_empty());
     assert!(new_ts.id_token.is_some());
     assert!(new_ts.refresh_token.is_some());
 
@@ -1065,7 +1413,7 @@ async fn test_token_revocation() -> Result<(), Box<dyn Error>> {
 
     // make sure it works for the userinfo in the same way
     let res = reqwest::Client::new()
-        .get(&format!("{}/oidc/userinfo", get_backend_url()))
+        .get(format!("{}/oidc/userinfo", get_backend_url()))
         .header(AUTHORIZATION, format!("Bearer {}", ts.access_token))
         .send()
         .await?;
@@ -1165,7 +1513,7 @@ async fn validate_token(
 
 async fn validate_token_request(token: String) -> Result<reqwest::Response, Box<dyn Error>> {
     let res = reqwest::Client::new()
-        .post(&format!("{}/oidc/introspect", get_backend_url()))
+        .post(format!("{}/oidc/introspect", get_backend_url()))
         .header(AUTHORIZATION, format!("Bearer {}", token))
         .form(&TokenValidationRequest { token })
         .send()

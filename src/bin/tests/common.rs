@@ -2,7 +2,7 @@
 use rauthy_api_types::oidc::{GrantType, LoginRequest, SessionInfoResponse, TokenRequest};
 use rauthy_common::constants::CSRF_HEADER;
 use rauthy_common::sha256;
-use rauthy_common::utils::base64_url_encode;
+use rauthy_common::utils::{base64_url_encode, base64_url_no_pad_decode};
 use rauthy_service::token_set::TokenSet;
 use reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
 use reqwest::{Response, header};
@@ -23,6 +23,17 @@ pub const CLIENT_ID: &str = "init_client";
 pub const CLIENT_SECRET: &str = "LjERi0WSEz1E9OY9KFJaMjlwV1Uf3nuIuOUnJnoJQNm2i7YMjTDMy4PbAKnYRgFy";
 pub const USERNAME: &str = "init_admin@localhost";
 pub const PASSWORD: &str = "123SuperSafe";
+
+/// Decodes the (unverified) JWT payload, so a test can assert on any claim.
+#[allow(dead_code)]
+pub fn decode_claims(access_token: &str) -> serde_json::Value {
+    let payload_b64 = access_token
+        .split('.')
+        .nth(1)
+        .expect("a JWT payload segment");
+    let bytes = base64_url_no_pad_decode(payload_b64).expect("valid base64url payload");
+    serde_json::from_slice(&bytes).expect("valid JSON claims")
+}
 
 #[allow(dead_code)]
 pub async fn check_status(res: Response, code: u16) -> Result<Response, Box<dyn Error>> {
@@ -52,7 +63,16 @@ pub fn get_backend_url() -> String {
 
 #[allow(dead_code)]
 pub fn get_issuer() -> String {
-    format!("{}", get_backend_url())
+    get_backend_url()
+}
+
+/// The RFC 9207 `iss` value as it appears on the wire: full issuer with trailing `/`,
+/// form-urlencoded independently of the server-side encoder.
+pub fn get_issuer_urlencoded() -> String {
+    format!(
+        "{}%2F",
+        get_issuer().replace(':', "%3A").replace('/', "%2F")
+    )
 }
 
 pub async fn get_token_set() -> TokenSet {
@@ -87,13 +107,21 @@ pub async fn get_token_set_init_client() -> TokenSet {
 }
 
 pub async fn session_headers() -> (HeaderMap, TokenSet) {
+    let redirect_uri = format!("{}/oidc/callback", get_backend_url());
+    session_headers_for_client("rauthy", None, &redirect_uri).await
+}
+
+pub async fn session_headers_for_client(
+    client_id: &str,
+    client_secret: Option<&str>,
+    redirect_uri: &str,
+) -> (HeaderMap, TokenSet) {
     let backend_url = get_backend_url();
     let client = reqwest::Client::new();
 
     let challenge_plain = "oDXug9zfYqfz8ejcqMpALRPXfW8QhbKV2AVuScAt8xrLKDAmaRYQ4yRi2uqcH9ys";
-    let redirect_uri = format!("{}/oidc/callback", backend_url);
     let query = format!(
-        "client_id=rauthy&redirect_uri={}&response_type=code",
+        "client_id={client_id}&redirect_uri={}&response_type=code",
         redirect_uri
     );
     let challenge_s256 = base64_url_encode(sha256!(challenge_plain.as_bytes()));
@@ -110,10 +138,10 @@ pub async fn session_headers() -> (HeaderMap, TokenSet) {
     let headers = cookie_csrf_headers_from_res_direct(res).await.unwrap();
 
     let req_login = LoginRequest {
-        email: USERNAME.to_string(),
+        email: Some(USERNAME.to_string()),
         password: Some(PASSWORD.to_string()),
         pow: get_solved_pow().await,
-        client_id: "rauthy".to_string(),
+        client_id: client_id.to_string(),
         redirect_uri: redirect_uri.to_string(),
         scopes: None,
         state: None,
@@ -121,6 +149,8 @@ pub async fn session_headers() -> (HeaderMap, TokenSet) {
         code_challenge: Some(challenge_s256),
         code_challenge_method: Some("S256".to_string()),
         resource: None,
+        resident_key_token: None,
+        fwda: None,
     };
 
     let res = client
@@ -137,7 +167,8 @@ pub async fn session_headers() -> (HeaderMap, TokenSet) {
         grant_type: GrantType::AuthorizationCode,
         code: Some(code),
         redirect_uri: Some(redirect_uri.to_string()),
-        client_id: Some("rauthy".to_string()),
+        client_id: Some(client_id.to_string()),
+        client_secret: client_secret.map(String::from),
         code_verifier: Some(challenge_plain.to_string()),
         ..Default::default()
     };
@@ -179,7 +210,7 @@ pub async fn session_headers_with(email: &str, password: &str) -> HeaderMap {
     let headers = cookie_csrf_headers_from_res_direct(res).await.unwrap();
 
     let req_login = LoginRequest {
-        email: email.to_string(),
+        email: Some(email.to_string()),
         password: Some(password.to_string()),
         pow: get_solved_pow().await,
         client_id: "rauthy".to_string(),
@@ -190,6 +221,8 @@ pub async fn session_headers_with(email: &str, password: &str) -> HeaderMap {
         code_challenge: Some(challenge_s256),
         code_challenge_method: Some("S256".to_string()),
         resource: None,
+        resident_key_token: None,
+        fwda: None,
     };
 
     let res = client
@@ -220,7 +253,7 @@ pub async fn cookie_csrf_headers_from_res_direct(
     let (session_cookie, _) = cookie.to_str()?.split_once(';').unwrap();
 
     let mut headers = HeaderMap::new();
-    headers.append(header::COOKIE, HeaderValue::from_str(&session_cookie)?);
+    headers.append(header::COOKIE, HeaderValue::from_str(session_cookie)?);
 
     let session_info = res.json::<SessionInfoResponse>().await.unwrap();
     headers.append(
@@ -238,7 +271,7 @@ pub async fn cookie_csrf_headers_from_res(res: Response) -> Result<HeaderMap, Bo
         if cookie.starts_with("__Host-RauthySession=") {
             println!("Extracted session cookie: {:?}", cookie);
             let mut headers = HeaderMap::new();
-            headers.append(header::COOKIE, HeaderValue::from_str(&cookie)?);
+            headers.append(header::COOKIE, HeaderValue::from_str(cookie)?);
 
             let content = res.text().await?;
             let (_, content_split) = content
@@ -255,27 +288,80 @@ pub async fn cookie_csrf_headers_from_res(res: Response) -> Result<HeaderMap, Bo
     panic!("Error extracting session cookie");
 }
 
-pub fn code_state_from_headers(res: Response) -> Result<(String, Option<String>), Box<dyn Error>> {
+fn location_url(res: &Response) -> Result<reqwest::Url, Box<dyn Error>> {
     let loc_header = res
         .headers()
         .get(header::LOCATION)
-        .unwrap()
-        .to_str()
-        .unwrap();
+        .ok_or("missing Location header")?
+        .to_str()?;
     println!("Location Header: {}", loc_header);
 
-    let code: String;
-    let mut state = None;
-    let (_, code_str) = loc_header.split_once("code=").unwrap();
-    if let Some((c, state_str)) = code_str.split_once('&') {
-        code = c.to_string();
-        let (_, s) = state_str.split_once("state=").unwrap();
-        state = Some(s.to_string());
-    } else {
-        code = code_str.to_string();
+    let url = reqwest::Url::parse(loc_header)?;
+    if url.fragment().is_some() {
+        return Err("Location must not contain a fragment".into());
     }
+    Ok(url)
+}
 
-    Ok((code, state))
+/// Raw (undecoded) pairs of the parsed `Location` query; asserts exactly one correct `iss`.
+pub fn authorization_response_params(
+    res: &Response,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let url = location_url(res)?;
+
+    for key in ["code", "state", "iss", "error"] {
+        let count = url.query_pairs().filter(|(k, _)| k == key).count();
+        if count > 1 {
+            return Err(format!("query param '{key}' appears {count} times").into());
+        }
+    }
+    let iss = url
+        .query_pairs()
+        .find(|(k, _)| k == "iss")
+        .map(|(_, v)| v.into_owned());
+    assert_eq!(iss, Some(format!("{}/", get_issuer())));
+
+    let params = url
+        .query()
+        .ok_or("Location has no query")?
+        .split('&')
+        .filter(|kv| !kv.is_empty())
+        .map(|kv| {
+            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+            (k.to_string(), v.to_string())
+        })
+        .collect::<Vec<_>>();
+
+    let iss = params
+        .iter()
+        .find(|(k, _)| k == "iss")
+        .map(|(_, v)| v.as_str());
+    assert_eq!(iss, Some(get_issuer_urlencoded().as_str()));
+
+    Ok(params)
+}
+
+/// Like `authorization_response_params`, but percent-decoded as a client sees them.
+pub fn authorization_response_params_decoded(
+    res: &Response,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    Ok(location_url(res)?
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect())
+}
+
+pub fn code_state_from_headers(res: Response) -> Result<(String, Option<String>), Box<dyn Error>> {
+    let params = authorization_response_params(&res)?;
+    let get = |key: &str| {
+        params
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+
+    let code = get("code").ok_or("missing 'code' in Location")?;
+    Ok((code, get("state")))
 }
 
 pub fn init_client_bcl_uri() -> String {

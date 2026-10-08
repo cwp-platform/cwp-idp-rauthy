@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use tracing::{debug, warn};
 
-// TODO After bumping to v0.37, make sure the lowest compatible is set to v0.36
-//  and `apply_temp_migrations()` was cleaned up!
-static LOWEST_COMPATIBLE_VERSION: &str = "0.35.0";
+// TODO when upgrading to `0.38`, the lowest compatible version will be `0.37` because of the
+//  hiqlite WAL format rework
+static LOWEST_COMPATIBLE_VERSION: &str = "0.36.0";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DbVersion {
@@ -98,9 +98,9 @@ ON CONFLICT(id) DO UPDATE SET data = $1"#;
     ) -> Result<(), ErrorResponse> {
         // this check panics on purpose, and it is there to never forget to adjust this
         // version check before doing any major or minor release
-        // TODO After bumping to v0.37, make sure the lowest compatible is set to v0.36
-        //  and `apply_temp_migrations()` was cleaned up!
-        if app_version.major != 0 || app_version.minor != 36 {
+        // TODO when upgrading to `0.38`, the `LOWEST_COMPATIBLE_VERSION` MUST be `0.37` because
+        //  of the hiqlite WAL format rework
+        if app_version.major != 0 || app_version.minor != 37 {
             panic!(
                 "\nDbVersion::check_app_version needs adjustment for the new RAUTHY_VERSION: \
                 {RAUTHY_VERSION}\\n Also make sure that `LOWEST_COMPATIBLE_VERSION` is still \

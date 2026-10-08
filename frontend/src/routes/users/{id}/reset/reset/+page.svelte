@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { generatePassword } from '$utils/helpers';
+    import { generatePassword, normalizeClientUri } from '$utils/helpers';
     import Button from '$lib5/button/Button.svelte';
     import PasswordPolicy from '$lib5/PasswordPolicy.svelte';
     import Input from '$lib5/form/Input.svelte';
@@ -14,13 +14,16 @@
     import Template from '$lib5/Template.svelte';
     import { useParam } from '$state/param.svelte';
     import ThemeSwitch from '$lib5/ThemeSwitch.svelte';
-    import type { MfaPurpose, WebauthnAdditionalData } from '$webauthn/types.ts';
+    import type { WebauthnAdditionalData } from '$mfa/webauthn/types.ts';
     import InputPassword from '$lib5/form/InputPassword.svelte';
     import A from '$lib5/A.svelte';
-    import { webauthnReg } from '$webauthn/registration';
+    import { webauthnReg } from '$mfa/webauthn/registration';
     import Form from '$lib5/form/Form.svelte';
     import { PATTERN_USER_NAME } from '$utils/patterns';
     import type { PasswordResetRequest } from '$api/types/password_reset.ts';
+    import type { MfaPurpose } from '$api/types/mfa';
+    import LabeledValue from '$lib/LabeledValue.svelte';
+    import Options from '$lib/Options.svelte';
 
     const inputWidth = '20rem';
 
@@ -45,6 +48,8 @@
     let password = $state('');
     let passwordConfirm = $state('');
 
+    let passkeyType = $state(t.account.passkeys.types[0]);
+
     let reportValidityNew: undefined | (() => void) = $state();
     let reportValidityConfirm: undefined | (() => void) = $state();
 
@@ -66,7 +71,7 @@
         if (success) {
             setTimeout(() => {
                 if (redirectUri) {
-                    window.location.replace(redirectUri);
+                    window.location.replace(normalizeClientUri(redirectUri));
                 } else {
                     navigateToAccount();
                 }
@@ -111,9 +116,18 @@
             t.authorize.requestExpired,
             tplData.magic_link_id,
             tplData.csrf_token,
+            undefined,
+            // the 2nd type is the resident key
+            passkeyType === t.account.passkeys.types[1],
         );
         if (res.error) {
-            err = `${t.mfa.errorReg} - ${res.error}`;
+            console.log(res.error.toLowerCase());
+            // Either completely missing attestation or no matching requirements.
+            if (res.error.toLowerCase().includes('missing attestation')) {
+                err = t.account.passkeys.missingAttestation;
+            } else {
+                err = `${t.mfa.errorReg} - ${res.error}`;
+            }
         } else {
             resetValues();
             success = true;
@@ -175,7 +189,16 @@
     }
 
     function onWebauthnError(error: string) {
-        err = error;
+        let isAttErr =
+            error.includes('certification level') ||
+            error.includes('key protection') ||
+            error.includes('attachment hint');
+        if (isAttErr) {
+            console.error(error);
+            err = t.account.passkeys.missingAttestation;
+        } else {
+            err = error;
+        }
         mfaPurpose = undefined;
     }
 
@@ -269,6 +292,7 @@
         {#if mfaPurpose && tplData}
             <WebauthnRequest
                 purpose={mfaPurpose}
+                resetUserId={tplData.user_id}
                 onSuccess={onWebauthnSuccess}
                 onError={onWebauthnError}
             />
@@ -282,79 +306,98 @@
                 <br />
                 <br />
                 {t.passwordReset.success3}
-                <A href={redirectUri || '/auth/v1/account'}>Account</A>
+                <A href={redirectUri ? normalizeClientUri(redirectUri) : '/auth/v1/account'}>
+                    Account
+                </A>
             </p>
         {:else if tplData}
             <div class="container">
-                {#if requestType.get()?.startsWith('new_user')}
-                    <h1>{t.passwordReset.newAccount}</h1>
-                    <p>{t.passwordReset.newAccDesc1}</p>
-                    <p>
-                        {t.passwordReset.newAccDesc2}
-                        <A href={t.passwordReset.fidoLink} target="_blank">FIDO Alliance</A>
-                    </p>
+                <div>
+                    {#if requestType.get()?.startsWith('new_user')}
+                        <h1>{t.passwordReset.newAccount}</h1>
+                        <p>{t.passwordReset.newAccDesc1}</p>
+                        <p>
+                            {t.passwordReset.newAccDesc2}
+                            <A href={t.passwordReset.fidoLink} target="_blank">FIDO Alliance</A>
+                        </p>
 
-                    <div class="typeChoice">
-                        <Button
-                            level={!accountTypeNew ? 1 : 3}
-                            onclick={() => (accountTypeNew = 'passkey')}
-                            {isLoading}
-                        >
-                            {t.passwordReset.passwordless}
-                        </Button>
-                        <Button
-                            level={!accountTypeNew ? 2 : 3}
-                            onclick={() => (accountTypeNew = 'password')}
-                            {isLoading}
-                        >
-                            {t.passwordReset.password}
-                        </Button>
-                    </div>
-
-                    {#if accountTypeNew === 'password'}
-                        <div transition:slide>
-                            {@render passwordInput()}
+                        <div class="typeChoice">
+                            <Button
+                                level={!accountTypeNew ? 1 : 3}
+                                onclick={() => (accountTypeNew = 'passkey')}
+                                {isLoading}
+                            >
+                                {t.passwordReset.passwordless}
+                            </Button>
+                            <Button
+                                level={!accountTypeNew ? 2 : 3}
+                                onclick={() => (accountTypeNew = 'password')}
+                                {isLoading}
+                            >
+                                {t.passwordReset.password}
+                            </Button>
                         </div>
-                    {:else if accountTypeNew === 'passkey'}
-                        <div transition:slide>
-                            <Form action="" onSubmit={handleRegister}>
-                                <Input
-                                    bind:ref={refPasskey}
-                                    bind:value={passkeyName}
-                                    autocomplete="off"
-                                    label={t.mfa.passkeyName}
-                                    placeholder={t.mfa.passkeyName}
-                                    width={inputWidth}
-                                    maxLength={32}
-                                    pattern={PATTERN_USER_NAME}
-                                    required
-                                />
-                                <Button type="submit" level={success ? 2 : 1}>
-                                    {t.mfa.register}
-                                </Button>
-                            </Form>
 
-                            {#if success}
-                                <div class="success">
-                                    <p>{t.passwordReset.successPasskey1}</p>
-                                    <p>{t.passwordReset.successPasskey2}</p>
-                                    <Button onclick={navigateToAccount}>
-                                        {t.passwordReset.accountLogin}
-                                    </Button>
-                                </div>
-                            {/if}
+                        {#if accountTypeNew === 'password'}
+                            <div transition:slide>
+                                {@render passwordInput()}
+                            </div>
+                        {:else if accountTypeNew === 'passkey'}
+                            <div transition:slide>
+                                <Form action="" onSubmit={handleRegister}>
+                                    <LabeledValue label={t.account.passkeys.type}>
+                                        <Options
+                                            options={[
+                                                t.account.passkeys.types[0],
+                                                t.account.passkeys.types[1],
+                                            ]}
+                                            bind:value={passkeyType}
+                                            ariaLabel={t.account.passkeys.type}
+                                        />
+                                        {#if passkeyType === t.account.passkeys.types[1]}
+                                            <p class="rkWarn">{t.account.passkeys.rkWarning}</p>
+                                        {/if}
+                                    </LabeledValue>
+                                    <Input
+                                        bind:ref={refPasskey}
+                                        bind:value={passkeyName}
+                                        autocomplete="off"
+                                        label={t.mfa.passkeyName}
+                                        placeholder={t.mfa.passkeyName}
+                                        width={inputWidth}
+                                        maxLength={32}
+                                        pattern={PATTERN_USER_NAME}
+                                        required
+                                    />
+                                    <div class="btnReg">
+                                        <Button type="submit" level={success ? 2 : 1}>
+                                            {t.mfa.register}
+                                        </Button>
+                                    </div>
+                                </Form>
+
+                                {#if success}
+                                    <div class="success">
+                                        <p>{t.passwordReset.successPasskey1}</p>
+                                        <p>{t.passwordReset.successPasskey2}</p>
+                                        <Button onclick={navigateToAccount}>
+                                            {t.passwordReset.accountLogin}
+                                        </Button>
+                                    </div>
+                                {/if}
+                            </div>
+                        {/if}
+                    {:else if requestType.get()?.startsWith('password_reset')}
+                        <h1>Password Reset</h1>
+                        {@render passwordInput()}
+                    {/if}
+
+                    {#if err}
+                        <div class="err">
+                            {err}
                         </div>
                     {/if}
-                {:else if requestType.get()?.startsWith('password_reset')}
-                    <h1>Password Reset</h1>
-                    {@render passwordInput()}
-                {/if}
-
-                {#if err}
-                    <div class="err">
-                        {err}
-                    </div>
-                {/if}
+                </div>
             </div>
         {/if}
 
@@ -365,10 +408,17 @@
 <LangSelector absolute />
 
 <style>
+    .btnReg {
+        margin-top: 1rem;
+    }
+
     .container {
         margin-top: -1.75rem;
         max-height: calc(100dvh - 2.5rem);
-        max-width: 100dvw;
+        width: 100dvw;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
         overflow-y: auto;
     }
 
@@ -394,6 +444,11 @@
     .policy {
         max-width: 100dvw;
         overflow: clip;
+    }
+
+    .rkWarn {
+        color: hsl(var(--error));
+        font-size: 0.9rem;
     }
 
     .typeChoice {

@@ -51,11 +51,11 @@ pub async fn grant_type_authorization_code(
     let (client_id, client_secret) = req_data.try_get_client_id_secret(&req)?;
     let client = Client::find_maybe_ephemeral(client_id.clone())
         .await
-        .map_err(|_| {
-            ErrorResponse::new(
-                ErrorResponseType::NotFound,
-                format!("Client '{client_id}' not found"),
-            )
+        .map_err(|mut err| {
+            if err.error == ErrorResponseType::NotFound {
+                err.message = format!("Client '{client_id}' not found").into();
+            }
+            err
         })?;
     client.validate_enabled()?;
     let header_origin = client.get_validated_origin_header(&req)?;
@@ -67,7 +67,6 @@ pub async fn grant_type_authorization_code(
         client.validate_secret(secret, &req).await?;
     }
     client.validate_flow(GrantType::AuthorizationCode)?;
-    client.validate_redirect_uri(req_data.redirect_uri.as_deref().unwrap_or_default())?;
 
     // check for DPoP header
     let mut headers = Vec::new();
@@ -95,9 +94,8 @@ pub async fn grant_type_authorization_code(
         ));
     }
 
-    // get the oidc code from the cache
     let idx = req_data.code.as_ref().unwrap().to_owned();
-    let code = match AuthCode::find(idx).await? {
+    let code = match AuthCode::find_remove(idx).await? {
         None => {
             warn!(
                 "'auth_code' could not be found inside the cache - Host: {}",
@@ -111,6 +109,11 @@ pub async fn grant_type_authorization_code(
         Some(code) => code,
     };
     // validate the oidc code
+    code.validate_redirect_uri_exact(
+        &client,
+        req_data.redirect_uri.as_deref().unwrap_or_default(),
+        RauthyConfig::get().vars.access.rfc_8252_enable,
+    )?;
     if code.client_id != client_id {
         let err = format!("Wrong 'code' for client_id '{client_id}'");
         warn!(err);
@@ -169,21 +172,22 @@ pub async fn grant_type_authorization_code(
     };
 
     let user = User::find(code.user_id.clone()).await?;
+    user.check_enabled()?;
+    user.check_expired()?;
+
     let token_set = TokenSet::from_user(
         &user,
         &client,
         AuthTime::given(user.last_login.unwrap_or_else(|| Utc::now().timestamp())),
         dpop_fingerprint,
         code.nonce.clone().map(TokenNonce),
-        Some(TokenScopes(code.scopes.join(" "))),
+        Some(TokenScopes::new(code.scopes.join(" "))),
         code.session_id.clone().map(SessionId),
         resource,
         AuthCodeFlow::Yes,
         DeviceCodeFlow::No,
     )
     .await?;
-
-    code.delete().await?;
 
     // update session metadata
     if let Some(sid) = code.session_id.clone() {

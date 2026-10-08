@@ -177,19 +177,14 @@ pub struct AddressClaim {
 #[derive(Deserialize, Validate, ToSchema, IntoParams)]
 pub struct AuthRequest {
     /// Validation: `^[a-zA-Z0-9,.:/_\-&?=~#!$'()*+%]{2,128}$`
-    ///
-    /// Optional so the unified login/register page can be opened without an
-    /// OIDC client (falls back to the account client `rauthy` server-side).
     #[validate(regex(
         path = "*RE_CLIENT_ID",
         code = "^[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]{2,256}$"
     ))]
-    pub client_id: Option<String>,
+    pub client_id: String,
     /// Validation: `[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$`
-    ///
-    /// Optional for the same reason as `client_id`.
     #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$"))]
-    pub redirect_uri: Option<String>,
+    pub redirect_uri: String,
     /// Validation: `[a-z0-9-_/]{2,128}`
     #[validate(regex(path = "*RE_LOWERCASE", code = "[a-z0-9-_/]{2,128}"))]
     #[serde(default = "default_response_type")]
@@ -237,9 +232,10 @@ pub struct BackchannelLogoutRequest {
     pub logout_token: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CertsParams {
     pub skip_okp: Option<bool>,
+    pub rfc_9864: Option<bool>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -256,7 +252,7 @@ pub enum DeviceAcceptedRequest {
 pub struct LoginRequest {
     /// Validation: `email`
     #[validate(email)]
-    pub email: String,
+    pub email: Option<String>,
     /// Validation: Applies password policy - max 256 characters
     #[validate(length(max = 256))]
     pub password: Option<String>,
@@ -296,6 +292,11 @@ pub struct LoginRequest {
     /// Validation: `[a-zA-Z0-9,.:/_-&?=~!$'()*+%@]+$` (no `#`; RFC 8707 forbids a fragment)
     #[validate(regex(path = "*RE_RESOURCE", code = "[a-zA-Z0-9,.:/_-&?=~!$'()*+%@]+$"))]
     pub resource: Option<String>,
+    #[validate(length(max = 64))]
+    pub resident_key_token: Option<String>,
+    /// Set by Rauthy internally if this was a login triggered via Forward Auth. If set, it will
+    /// do additional state lookup checks.
+    pub fwda: Option<bool>,
 }
 
 #[derive(Deserialize, Validate, ToSchema)]
@@ -330,6 +331,9 @@ pub struct LoginRefreshRequest {
     /// Validation: `[a-zA-Z0-9,.:/_-&?=~!$'()*+%@]+$` (no `#`; RFC 8707 forbids a fragment)
     #[validate(regex(path = "*RE_RESOURCE", code = "[a-zA-Z0-9,.:/_-&?=~!$'()*+%@]+$"))]
     pub resource: Option<String>,
+    /// Set by Rauthy internally if this was a login triggered via Forward Auth. If set, it will
+    /// do additional state lookup checks.
+    pub fwda: Option<bool>,
 }
 
 #[derive(Default, Deserialize, Validate, ToSchema, IntoParams)]
@@ -533,9 +537,9 @@ pub struct DeviceCodeResponse<'a> {
     pub verification_uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_uri_complete: Option<String>,
-    pub expires_in: u32,
+    pub expires_in: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub interval: Option<u32>,
+    pub interval: Option<u64>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -554,8 +558,11 @@ pub enum JwkKeyPairAlg {
     RS256,
     RS384,
     RS512,
+    // Current or "old" notation for Ed25519
     #[default]
     EdDSA,
+    // New notation for EdDSA (RFC 9864)
+    Ed25519,
 }
 
 impl Display for JwkKeyPairAlg {
@@ -565,6 +572,7 @@ impl Display for JwkKeyPairAlg {
             JwkKeyPairAlg::RS384 => "RS384",
             JwkKeyPairAlg::RS512 => "RS512",
             JwkKeyPairAlg::EdDSA => "EdDSA",
+            JwkKeyPairAlg::Ed25519 => "Ed25519",
         };
         write!(f, "{s}")
     }

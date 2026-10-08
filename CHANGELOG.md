@@ -1,5 +1,1050 @@
 # Changelog
 
+## v0.37.1
+
+### Security
+
+#### Ephemeral Clients
+
+The lookup of an ephemeral (CIMD) client document fetched any `client_id` URL with the shared HTTP
+client: it followed redirects, used system proxies, connected to loopback, private and link-local
+addresses (including cloud metadata endpoints) and read the body without a size limit. Since the
+`client_id` comes from an unauthenticated request, this was an SSRF and memory exhaustion vector.
+The lookup now uses a dedicated fetcher that follows redirects only to `https` (at most 5), never
+uses a proxy, resolves the host itself and only connects to the public addresses it verified (IP
+literals, also as a redirect target, are checked before connecting, IPv4-mapped, NAT64, SIIT, 6to4
+and Teredo forms included), caps the document size and limits concurrent lookups. Errors returned to
+the client are generic, details are logged.
+
+```toml
+[ephemeral_clients]
+# The maximum size in bytes of a remote ephemeral client document.
+# Larger documents will be rejected during the lookup.
+# Must be at least 1024.
+#
+# default: 65536
+# overwritten by: EPHEMERAL_CLIENTS_MAX_DOCUMENT_BYTES
+max_document_bytes = 65536
+
+# Ephemeral client URLs that resolve to a loopback, private,
+# link-local or otherwise non-public address are rejected by
+# default to prevent SSRF into internal services (like cloud
+# metadata endpoints). Redirects are followed only to https, and the
+# redirect target is subject to the same address checks.
+#
+# Ephemeral client lookups never use system proxies (HTTP_PROXY etc.),
+# because a proxy would bypass the address checks.
+#
+# CAUTION: only enable this for local development, when your
+# ephemeral client document is served from a private address.
+#
+# default: false
+# overwritten by: EPHEMERAL_CLIENTS_DANGER_ALLOW_PRIVATE_ADDRESSES
+danger_allow_private_addresses = false
+```
+
+[#1778](https://github.com/sebadob/rauthy/pull/1778)
+[#1780](https://github.com/sebadob/rauthy/pull/1780)
+
+#### Logout
+
+Up until now, when a token was refreshed, the new `refresh_token` did not carry the original session
+ID. This makes sense when you see it in a way that this refresh was done independently from any
+session at all. It's usually a client backend that triggers it. However, dropping the `sid` in this
+case made it impossible to also revoke refresh tokens on session logout, if the user had a long
+running session that outlived token refreshes. This version now adds the `sid` to all newly issues
+refresh tokens, which means when you set `access.token_revoke_on_logout = true`, all refresh tokens
+that may be issued in the future, that also originiated from "this" session, will be revoked as
+well. This does not happen if the session expires on its own. Only when a dedicated logout was
+requested.
+
+[#1775](https://github.com/sebadob/rauthy/issues/1775)
+
+### Changes
+
+#### `name` in `id_token`
+
+Rauthy always sent `given_name` and `family_name` as specific values (and OIDC standard claims)
+inside the `id_token`. But, `name` also exists. It's basically the concanenation of all name values
+the IdP knows, and any client can build it on its own. Rauthy never added this field because I think
+it's actually just token bloat. It's a copy & paste of values that exist anyway.
+
+However, there are apps out there that expect the `name` field being present, and that do not accept
+or even look for the specific values. For instance, this was an issue
+with [Netbird](https://netbird.io/). Even though I still think this value is unnecessary overhead, I
+added it to the `id_token` for broader compatibility. This means e.g. Netbird as well is fixed, and
+a login via Rauthy as Generic OIDC provider works flawlessly.
+
+[#1771](https://github.com/sebadob/rauthy/pull/1771)
+
+#### Ephemeral Client `default_scopes`
+
+Ephemeral clients get configurable `default_scopes`. Until now, every ephemeral client (CIMD) got
+the full `allowed_scopes` list as its default scopes, so each token carried all of them no matter
+what the client requested.
+
+```toml
+[ephemeral_clients]
+# The default scopes for ephemeral clients. These will always be
+# added to a token for an ephemeral client, no matter which scopes
+# it requested.
+#
+# If not set (or set to an empty list), this defaults to the full
+# `allowed_scopes` list. If you want minimal grants and let the
+# client request additional scopes explicitly, set it to
+# `['openid']`. A non-empty list must contain `openid`, and every
+# entry must also exist in `allowed_scopes`.
+#
+# default: same as `allowed_scopes`
+# overwritten by: EPHEMERAL_CLIENTS_DEFAULT_SCOPES - single String, \n separated values
+default_scopes = ['openid', 'profile', 'email']
+```
+
+[#1777](https://github.com/sebadob/rauthy/pull/1777)
+
+### Bugfix
+
+- `0.37.0` came with a regression when you were using Forward Authentication. As part of the big
+  oevrall security hardening process, the `AuthCode` was bound to the `state` when redirecting via
+  forward auth. The issue was, that a link on the login-side was frogotten, which made forward auth
+  fail all the time (the saved state is not needed for any other flow).
+  [#1770](https://github.com/sebadob/rauthy/pull/1770)
+- `0.37.0` broucht another regression in terms of `localhost` redirects. When you wanted to match
+  any port during callbacks, you could write `http://localhost:*` as an accepted `redirect_uri`.
+  As part of the security hardening, redirect URIs are now validated much stricter, and this syntax
+  does not work anymore. It still does not, but the original issue is fixed. To get it back, enable
+  `access.rfc_8252_enable = true`. If you did, you can set a `redirect_uri` like
+  `http://localhost:/callback`, at any port (as long as its on loopback) is accepted.
+  [#1769](https://github.com/sebadob/rauthy/pull/1769)
+- `ui_locales_supported` on the `.well-known/openid-configuration` endpoint was returning an invalid
+  value `zhhans`. This should have been `zh-Hans`, and it made some parser fail (e.g. SonarQube).
+  The returned values here are fixed and have the correct format, and they also respect you config
+  of `i18n.filter_lang_common`, and shows only filtered values.
+  [#1772](https://github.com/sebadob/rauthy/pull/1772)
+- A dynamic client updating its own registration resets every value only an admin can set to its
+  default, among them `enabled`, the token lifetimes, `restrict_group_prefix`, custom `claims`,
+  `allowed_resources` and `default_aud`. A disabled dynamic client could enable itself again this
+  way (not that crucial. It could also easily re-register anyway). These values are now kept, and a
+  disabled dynamic client gets a `403` instead. A self-update can no longer add a grant type the
+  client does not have yet: it may keep or narrow its `grant_types`, anything else is rejected with
+  a `400` and `invalid_client_metadata`. Otherwise a client restricted to e.g. `authorization_code`
+  could add `client_credentials` and mint tokens carrying the kept admin-set `default_aud` and
+  `claims`. Grant types beyond the current ones need an admin.
+  All of this is not really security-related, it's good practice. When DCR is enabled, any rejected
+  client can easily re-register a fresh one anway.
+  [#1774](https://github.com/sebadob/rauthy/pull/1774)
+
+## v0.37.0
+
+### BREAKING - VERY IMPORTANT (if you run a HA cluster)
+
+**IF YOU DO NOT FOLLOW THE STEPS BELOW, YOU MIGHT END UP WITH INCONSISTENT DATA!**
+
+**CREATE A BACKUP BEFORE YOU UPGRADE!**
+
+If you run a single instance, you can ignore this block. However, if you run a HA deployment, you
+**MUST** do a full shutdown of the cluster! It is absolutely crucial that you **MUST NOT** do a
+**ROLLING RELEASE**! If you do it anyway, you will most probably end up with inconsistent cache
+data, or even a crashing application.
+
+The reason for this is a major internal rework of Hiqlite with lots of optimizations and
+improvements. This may be annoying right now, but makes everything a lot more maintainable,
+future-proof, and more robust. We also gained a bit more efficiency and speed for the Raft network.
+
+Your cache data will be cleaned up on restart, when you start this new version for the first time.
+Rauthy does as much as possible automatically. You only **MUST GUARANTEE** that you do a full
+cluster shutdown with the old version, before you then start this new one!
+
+There are as many safeguards and checks as possible in place. It "should" not be possible to screw
+this up, theoretically. If Rauthy detects that it is a HA cluster, it tries to fetch the version
+from other nodes before doing the programmatic migration, and it tries to catch all possible cases,
+but it's not guaranteed that I thought of all of them. But this is NOT foolproof! You can definitely
+construct situations where even these checks will fail. This should not happen during normal
+operation, but it is possible.
+
+Once again: **CREATE A BACKUP BEFORE YOU UPGRADE!**
+
+#### Howto (HA cluster)
+
+As mentioned already, you only need to do this for an HA deployment. Rauthy also sets the
+auto-migration helper ENV var automatically. This is `HQL_CACHE_WAL_AUTO_MIGRATE=true`. If set,
+Hiqlite will attempt to do an auto-cleanup of the cache data (if necessary). As long as everything
+goes to plan, you don't need to do anything else than not doing a rolling release.
+
+**HOWEVER**, if anything goes wrong, and you end up in some floating state, you also have a 2nd
+option: `HQL_CACHE_WAL_FORCE_MIGRATE=true`. If you set this ENV var, Hiqlite will **ALWAYS** do the
+cleanup, even if it detects that the data structure is already on the new version.
+
+> You can also do the migration manually. To do so, take a look at
+> the [Hiqlite Changelog](https://github.com/sebadob/hiqlite/blob/main/CHANGELOG.md).
+
+### Security
+
+Apart from the general security hardening (see below), there was one actual security issue. It was
+possible to get an open redirect during password resets, when you craft a manual API request. This
+had no direct security impact, but it could have been abused in a phishing campaign. A security
+advistory will be released in the upcoming weeks.
+
+### Breaking
+
+#### RFC 9068 `at+jwt` Token Type
+
+Access Tokens are issued with a JWT header `typ` of `at+jwt` now, as specified in
+[RFC 9068](https://www.rfc-editor.org/rfc/rfc9068.html). Rauthy's Access Tokens have been RFC
+9068-shaped for a long time already, but the header still used the generic `JWT`, which made it
+impossible for a resource server to tell an Access Token apart from an ID Token by the header alone.
+ID, Refresh and Logout Tokens are unchanged and keep using `JWT`.
+
+This is only breaking for downstream resource servers that check the header `typ` for exactly `JWT`.
+Rauthy itself accepts both values, so Access Tokens issued before an update stay valid until they
+expire. `rauthy-client` accepts `at+jwt` starting with `v0.14.3`; update the client before updating
+Rauthy to avoid an interruption in service.
+
+> If you use the `rauthy-client`, make sure to update it BEFORE upgrading Rauthy, so it will accept
+> the new `at+jwt` in the header. The new version will accept both `at+jwt` as well as `JWT`.
+
+[#1651](https://github.com/sebadob/rauthy/pull/1651)
+
+#### Config Values Renamed
+
+There were config values that had typos. They were not fixed earlier, because that would have been a
+breaking change for each single one of them. Because this version comes with improved lifetime or
+duration configuration, we needed to rename quite a few of them anyway, so it made sense to do all
+of these in one batch. Make sure to update your config, if you used any of these. Values in all
+capital letters and snake_case are env vars.
+
+| Old Name         | New Name          | 
+|------------------|-------------------|
+| GEO_BLOCK_UNKONW | GEO_BLOCK_UNKNOWN |
+| pasword_argon2id | password_argon2id |
+
+All the next values have been reworked. Some of them have been renamed, but all of them have their
+value type changed. This was done to make any duration-specifying value self-documenting. You can
+provide them either as a integer, and they will be interpretet as seconds, or with a unit like
+`'120s'`, `'3h'`, and so on. When given as a String, Rauthy parses the given input into a type-safe
+`Duration`. The input can have the following suffixes:
+
+- `s` -> seconds
+- `m` -> minutes
+- `h` -> hours
+- `d` -> days
+- `w` -> weeks
+- `y` -> years
+
+| Table                | Old Name                            | New Name                              | Old Unit     |
+|----------------------|-------------------------------------|---------------------------------------|--------------|
+| backchannel_logout   | token_lifetime                      |                                       |              |
+|                      | LOGOUT_TOKEN_LIFETIME               |                                       |              |
+| backchannel_logout   | allow_clock_skew                    |                                       |              |
+|                      | LOGOUT_TOKEN_ALLOW_CLOCK_SKEW       |                                       |              |
+| backchannel_logout   | allowed_token_lifetime              |                                       |              | 
+|                      | LOGOUT_TOKEN_ALLOWED_LIFETIME       |                                       |              |
+| bootstrap            | generated_secrets_ttl               |                                       |              |
+|                      | BOOTSTRAP_GENERATED_SECRETS_TTL     |                                       |              |
+| cred_stuff_detection | blacklist_duration                  |                                       |              |
+|                      | CRED_STUFF_BLACKLIST_DUR            |                                       |              |
+| cred_stuff_detection | scan_window                         |                                       |              |
+|                      | CRED_STUFF_SCAN_WINDOW              |                                       |              |
+| cluster              | health_check_delay_secs             | health_check_delay                    |              |
+|                      | HQL_HEALTH_CHECK_DELAY_SECS         | HQL_HEALTH_CHECK_DELAY                |              |
+| cluster              | backup_keep_days                    | backup_keep_for                       | Days         |
+|                      | HQL_BACKUP_KEEP_DAYS                | HQL_BACKUP_KEEP_FOR                   | Days         |
+| cluster              | backup_keep_days_local              | backup_keep_for_local                 | Days         |
+|                      | HQL_BACKUP_KEEP_DAYS_LOCAL          | HQL_BACKUP_KEEP_FOR_LOCAL             | Days         |
+| database             | health_check_delay_secs             | health_check_delay                    |              |
+|                      | HEALTH_CHECK_DELAY_SECS             | HEALTH_CHECK_DELAY                    |              |
+| database             | sched_user_exp_mins                 | sched_user_exp                        | Minutes      |
+|                      | SCHED_USER_EXP_MINS                 | SCHED_USER_EXP                        | Minutes      |
+| database             | sched_user_exp_delete_mins          | sched_user_exp_delete                 | Minutes      |
+|                      | SCHED_USER_EXP_DELETE_MINS          | SCHED_USER_EXP_DELETE                 | Minutes      |
+| device_grant         | code_lifetime                       |                                       |              |
+|                      | DEVICE_GRANT_CODE_LIFETIME          |                                       |              |
+| device_grant         | rate_limit                          |                                       |              |
+|                      | DEVICE_GRANT_RATE_LIMIT             |                                       |              |
+| device_grant         | poll_interval                       |                                       |              |
+|                      | DEVICE_GRANT_POLL_INTERVAL          |                                       |              |
+| device_grant         | refresh_token_lifetime              |                                       | Hours        |
+|                      | DEVICE_GRANT_REFRESH_TOKEN_LIFETIME |                                       | Hours        |
+| dpop                 | nonce_exp                           |                                       |              |
+|                      | DPOP_NONCE_EXP                      |                                       |              |
+| dynamic_clients      | default_token_lifetime              |                                       |              |
+|                      | DYN_CLIENT_DEFAULT_TOKEN_LIFETIME   |                                       |              |
+| dynamic_clients      | cleanup_interval                    |                                       | Minutes      |
+|                      | DYN_CLIENT_CLEANUP_INTERVAL         |                                       | Minutes      |
+| dynamic_clients      | cleanup_minutes                     | cleanup_threshold                     | Minutes      | 
+|                      | DYN_CLIENT_CLEANUP_MINUTES          | DYN_CLIENT_CLEANUP_THRESHOLD          | Minutes      | 
+| dynamic_clients      | cleanup_inactive_days               | cleanup_inactive_threshold            | Days         |
+|                      | DYN_CLIENT_CLEANUP_INACTIVE_DAYS    | DYN_CLIENT_CLEANUP_INACTIVE_THRESHOLD | Days         |
+| dynamic_clients      | rate_limit_sec                      | rate_limit_reg                        |              |
+|                      | DYN_CLIENT_RATE_LIMIT_SEC           | DYN_CLIENT_RATE_LIMIT_REG             |              |
+| email.jobs           | orphaned_seconds                    | orphaned_pickup                       |              |
+|                      | EMAIL_JOBS_ORPHANED_SECONDS         | EMAIL_JOBS_ORPHANED_PICKUP            |              |
+| email.jobs           | scheduler_interval_seconds          | scheduler_interval                    |              |
+|                      | EMAIL_JOBS_SCHED_SECONDS            | EMAIL_JOBS_SCHED                      |              |
+| email.jobs           | batch_delay_ms                      | batch_delay                           | Milliseconds |
+|                      | EMAIL_JOBS_BATCH_DELAY_MS           | EMAIL_JOBS_BATCH_DELAY                | Milliseconds |
+| email.jobs           | password_exp_days                   | password_exp                          | Days         |
+|                      | EMAIL_PWD_EXP_DAYS                  | EMAIL_PWD_EXP                         | Days         |
+| ephemeral_clients    | cache_lifetime                      |                                       |              |
+|                      | EPHEMERAL_CLIENTS_CACHE_LIFETIME    |                                       |              |
+| events               | cleanup_days                        | cleanup_threshold                     | Days         |
+|                      | EVENT_CLEANUP_DAYS                  | EVENT_CLEANUP_THRESHOLD               | Days         |
+| hashing              | hash_await_warn_time                |                                       | Milliseconds |
+|                      | HASH_AWAIT_WARN_TIME                |                                       | Milliseconds |
+| http_client          | connect_timeout                     |                                       |              |
+|                      | HTTP_CONNECT_TIMEOUT                |                                       |              |
+| http_client          | request_timeout                     |                                       |              |
+|                      | HTTP_REQUEST_TIMEOUT                |                                       |              |
+| http_client          | idle_timeout                        |                                       |              |
+|                      | HTTP_IDLE_TIMEOUT                   |                                       |              |
+| lifetimes            | refresh_token_grace_time            |                                       |              |
+|                      | REFRESH_TOKEN_GRACE_TIME            |                                       |              |
+| lifetimes            | refresh_token_lifetime              |                                       | Hours        |
+|                      | REFRESH_TOKEN_LIFETIME              |                                       | Hours        |
+| lifetimes            | session_lifetime                    |                                       |              |
+|                      | SESSION_LIFETIME                    |                                       |              |
+| lifetimes            | session_timeout                     |                                       |              |
+|                      | SESSION_TIMEOUT                     |                                       |              |
+| lifetimes            | magic_link_pwd_reset                |                                       | Minutes      |
+|                      | ML_LT_PWD_RESET                     |                                       | Minutes      |
+| lifetimes            | magic_link_pwd_first                |                                       | Minutes      |
+|                      | ML_LT_PWD_FIRST                     |                                       | Minutes      |
+| pam                  | remote_password_ttl                 |                                       |              |
+|                      | PAM_REMOTE_PASSWORD_TTL             |                                       |              |
+| pam.authorized_keys  | blacklist_cleanup_days              | blacklist_cleanup_threshold           | Days         |
+|                      | PAM_SSH_BLACKLIST_CLEANUP_DAYS      | PAM_SSH_BLACKLIST_CLEANUP_THRESHOLD   | Days         |
+| pam.authorized_keys  | forced_key_expiry                   | forced_key_expiry                     | Days         |
+|                      | PAM_SSH_KEY_EXP_DAYS                | PAM_SSH_KEY_EXP                       | Days         |
+| pow                  | exp                                 |                                       |              |
+|                      | POW_EXP                             |                                       |              |
+| server               | see_keep_alive                      |                                       |              |
+|                      | SSE_KEEP_ALIVE                      |                                       |              |
+| suspicious_requests  | blacklist                           |                                       |              |
+|                      | SUSPICIOUS_REQUESTS_BLACKLIST       |                                       |              |
+| tos                  | accept_timeout                      |                                       |              |
+|                      | TOS_ACCEPT_TIMEOUT                  |                                       |              |
+| webauthn             | req_exp                             |                                       |              |
+|                      | WEBAUTHN_REQ_EXP                    |                                       |              |
+| webauthn             | data_exp                            |                                       |              |
+|                      | WEBAUTHN_DATA_EXP                   |                                       |              |
+| webauthn             | renew_exp                           |                                       | Hours        |
+|                      | WEBAUTHN_RENEW_EXP                  |                                       | Hours        |
+
+> Values without a Table are ENV vars. If a value does not have a new name, it's only an indicator
+> that the value type was changed. When they have data in `Old Unit`, it highlights that it was NOT
+> in seconds before and it needs an update even without a name change.
+
+[#1739](https://github.com/sebadob/rauthy/pull/1739)
+
+#### SMTP Setup Rework
+
+Setting up SMTP connections was found to be a bit misleading or hard to debug. By default, implicit
+TLS will always be chosen, and the `smtp_port` will always be selected automatically (if not
+overwritten via `smtp_port`) depending on the TLS mode.
+
+**Removed:**
+
+- `email.starttls_only`
+- `email.danger_insecure`
+
+**Added:**
+
+- `email.smtp_tls_mode`
+
+The values `email.starttls_only` (misleading naming) and `email.danger_insecure` were removed. New
+is now `email.smtp_tls_mode` with the goal to reduce any misleading naming or unexpected behavior.
+There is no automatic fallback from TLS to STARTTLS (since quite a few versions), even though the
+docs about it were outdated. You configure the exact mode you want to use for the connection, so you
+cannot get confused. The default implicit TLS will be the correct mode for almost all SMTP servers.
+
+```toml
+[email]
+# Configure the TLS mode for SMTP connections.
+#
+# The default is implicit TLS. Depending on the mode the
+# proper default port will be used automatically if you
+# don't overwrite via `smtp_port`.
+#
+# NOTE: `danger-insecure` will allow an unencrypted and
+# unauthenticated SMTP connection to an SMTP relay on e.g.
+# your localhost or for development purposes. When set,
+# `smtp_username` and `smtp_password` will be ignored
+# and `smtp_port` will default to 1025.
+#
+# possible values: tls, starttls, danger-insecure
+# default: tls
+# overwritten by: SMTP_TLS_MODE
+smtp_tls_mode = 'tls'
+```
+
+[#1721](https://github.com/sebadob/rauthy/pull/1721)
+
+#### Forward Auth `redirect_state`
+
+The `redirect_state` query param used in Forward Auth is now limited to codes of 300 - 599. By
+default, a success will always return a 200 anyway, so there is no need to overwrite it. The reason
+is to prevent dynamic proxy configs from potentially forwarding this value from a client, which
+tries to spoof a value that usually only the reverse proxy should ever set.
+
+[#1728](https://github.com/sebadob/rauthy/pull/1728)
+
+#### Stricter `redirect_uri` Validation
+
+Client redirect URIs are validated more strictly now. A redirect URI must not contain:
+
+- a fragment (`#`), as required by
+  [RFC 6749 §3.1.2](https://www.rfc-editor.org/rfc/rfc6749#section-3.1.2). This rejects hash-router
+  URIs like `https://app.example.com/#/callback` as well.
+- a `,`, because redirect URIs are stored comma-separated.
+- a query parameter that the authorization response sets itself: `code`, `state`, `error`,
+  `error_description`, `error_uri` or `iss`. Keys are compared decoded and case-insensitively, and
+  forms that common server-side parsers fold into one of these, like `%69ss`, `code[]` or
+  `error.description`, are rejected too.
+
+This is checked when a client is created or updated (Admin UI, API, dynamic client registration,
+ephemeral clients, bootstrap), and for the `redirect_uri` of each authorization request. The
+`client_uri`, post-logout redirect URIs and the SCIM base URI do not accept `#` or `,` anymore
+either.
+
+Already stored redirect URIs are not migrated. An authorization request with such a URI is
+rejected, and the client cannot be saved until the URI is replaced. At startup, Rauthy logs a
+warning for each affected client and URI, and the Admin UI shows why a redirect URI is invalid. To
+fix a client, replace the URI with a valid one, e.g. a path-based callback instead of a fragment.
+
+[#1757](https://github.com/sebadob/rauthy/pull/1757)
+
+#### Stricter `post_logout_redirect_uri` Validation
+
+Post-logout redirect URIs follow the same rules now. A post-logout redirect URI must not contain a
+fragment (`#`), which would swallow the `state` appended on logout, a `,`, or a `state` query
+parameter, compared the same way as above. `state` is the only parameter Rauthy appends on logout
+([RP-Initiated Logout 1.0 §3](https://openid.net/specs/openid-connect-rpinitiated-1_0.html#RedirectionAfterLogout)),
+so other keys like `code` or `iss` are still allowed here.
+
+This is checked when a client is created or updated (Admin UI, API, dynamic client registration,
+ephemeral clients, bootstrap), and for the `post_logout_redirect_uri` of each logout request, so a
+wildcard registration cannot be used to inject a second `state` or a fragment anymore. The `state`
+on the logout redirect is now form-urlencoded and appended exactly once, like on authorization
+redirects, with a space sent as `%20`.
+
+Already stored post-logout redirect URIs are not migrated. A logout request with such a URI is
+rejected, and the client cannot be saved until the URI is replaced. At startup, Rauthy logs a
+warning for each affected client and URI, and the Admin UI shows why a URI is invalid.
+
+[#1761](https://github.com/sebadob/rauthy/pull/1761)
+
+### Changes
+
+#### Security Hardening and General Stability
+
+The security and usability was improved in lots of places with small changes:
+
+- Fixed a possible open redirect during password resets. No direct security impact, but could have
+  been used as part of a phishing campaign. This was the only "real" security issue.
+- The login delay handler that delays login responses on failed authentication, and takes care of IP
+  blacklisting, now combines the already existing per-IP-counter with the
+  `user.failed_login_attempts`. It will use which ever values is higher. With this attempt, you
+  won't see a change in behavior when a single IP is doing multiple failed logins for a single user,
+  because their counters will always match, but Rauthy will be able to catch a distributed
+  brute-force for a single user more quickly. For instance, when you use a botnet trying to break in
+  to a user account, and each bot only checks a hand ful of passwords, the per-IP approach is not
+  sufficient. This new one catches each single one of them after the first try, and will blacklist
+  them immediately.
+- The 2-step `authorization_code` flow made sure that a user is enabled and has not expired during
+  the first step, before any auth code would be sent out. The token exachange usually comes directly
+  afterwards, but the client also had a small window to exchange this code (configured via
+  `client.auth_code_lifetime`). If a user is disabled or expires between between these 2 steps, the
+  auth code is being rejected now. Technically, the code itself is valid, but an additional check
+  makes the process more strict.
+- The rejections during login when a user has either expired or was disabled were moved after the
+  password check. The error types of both are being forwarded to the UI for best UX, so the user
+  knows the credentials were okay, but their account was just disabled. Technically, this could have
+  been abused for username enumeration, but only for disabled accounts, which are no attack target.
+  This message is now only shown to actually authenticated users.
+- The `redirect_uri` comparison during `POST /token` is now an exact match against the one that was
+  used during `/authroize`. This makes us match exactly the RFC. This is not really a security issue
+  (at least not on Rauthys side), but an additional defense in depht for vulnerable clients that
+  have issues on their side. There is usually nothing Rauthy can do about it when your client is
+  vulnerable, but in this case it may help in a very niche situation. There will be a security
+  advisory about it in the upcoming weeks.
+- The Credential Stuffing Detection feature exists since some versions now, but it only worked for
+  the `authorization_code` flow (which is used in almost all cases). If you however need the
+  `password` flow for a client for some reason (you typically don't), the same mechanism will be
+  triggered now as well. This means you get the detection across the boundaries of different auth
+  flows.
+- The internal `Session::set_authenticated()` has an additional check to prevent reviving logged-out
+  sessions during a race condition, e.g. when the user does a concurrent login on a different
+  device.
+- The login UI has a fast-path for when a user provided the email, but still needs to add the
+  password. This behavior exists to properly prevent login CSRF. However, there was a tiny time diff
+  between "user does not exist" and "user needs to provide a password" returns. In the real world,
+  you will most probably not be able to measure any timing differences, but the window is measured
+  now with each login, and a artificial delay is applied to the "user does not exist" fast-path to
+  make it impossible.
+- Validating and refreshing tokens was improved in a way that the initial token fetch from the DB
+  was made atomic in combination with a direct deletion. Never seen in the real world, but if you
+  did 2 concurrent refresh requests within a couple hundred microseconds, you might have been able
+  to refresh twice. To make something like this happen, you would need to trigger a refresh from the
+  exact same device and even process, and you would not get any elevated access, but it was still
+  theoretically possible.
+  This immediate deletion also makes the whole process more strict if anything about the request was
+  malformed or unexpected.
+- When a client does not respect the rate-limiting during polls for a pending device code, the code
+  is now deleted after 3 violations.
+- The `access.token_revoke_device_tokens` config setting is now being respected during *Delete All
+  Sessions Everywhere* triggered via the Admin UI, and when doing a force-logout for a user. If set,
+  it will in addition to the normal ones invalidate all possibly existing **Device** Refresh Tokens.
+  Keep in mind that you usually don't want this when you have IoT devices with limited capabilities,
+  that are cumbersome to log in because of limited capabilities. You could still log them out
+  manually if necessary.
+  A force-logout for all user sessions did also revoke all device tokens before, which made it
+  impossible to remove device tokens from this endpoint with the config variable.
+  `access.token_revoke_device_tokens` also got lost when a user does a dedicated logout via the
+  account dashboard. This was a bug, and it was added back in.
+- Even though very unlikely, it was possible to get into a race condition during `device_code`
+  authentication. It was never seen in the real world. However, it was theoretically possible that a
+  stale cache update overwrote a user-approval for a device login when it exactly overlaps with a
+  concurrent device poll that waits for exactly that approval.
+- When a client has 'Force MFA' and the `password` auth flow enabled at the same time, the UI will
+  now show a warning to make it very clear that the `password` flow cannot validate or even enforce
+  MFA. This is nothing new and it's due to the way it works. In fact, Rauthy even MUST NOT request
+  any MFA here to be compliant with the OIDC RFC. This is documented, but the UI highlights this
+  in addition.
+- Even though it's impossible to measure any differences in Rauthy (especially over the network),
+  more constant-time comparisons were added in mutliple places. In the real world, all of these
+  don't make any (!) mesaurable difference, and a timing attack would not be possible. Rust already
+  uses SIMD and other heavy optimizations for comparisons, that even when we were doing a simple
+  `==` comparison, it was impossible to measure a difference even when running inside the exact same
+  process. However, I received a few AI reports about it, and even though not a single one of them
+  was able to explopit it (of course not), I changed these comparisons because of best practice, and
+  to not get annoyed any more.
+- Webauthn Auth start and finish via PAM now requires a valid host + secret. This prevents resource
+  exhaustiong attacks, because every auth start will consume memory in the form of cached data.
+- The parsing function for SSH keys was hardened as well. This was no security issue, because a user
+  would only be able to trigger a self-lockout from hosts with a specifically crafted SSH key, but
+  it's at least a UX improvement. At the same time, more modern types of SSH keys are now allowed as
+  well.
+- SCIM operartions have been made more robust and fault-tolerant in general.
+- Backchannel logouts + retries have been made more robust for certain edge cases.
+- SSE Events dropped the per-IP keys, so they don't evict each other all the time, and has improved
+  logging now with better information and insight both for debugging and / or auditing.
+- Public KV store GETs for a key, that are not a JSON value, now return `text/plain` instead of
+  `text/html`. This removed the possibility for an Admin to theoretically store a self-XSS on
+  Rauthys own origin, and it basically a protection from a malicious admin.
+- In general, lots of tiny fixes that either convert a `panic` (mostly unreachable anyway) into an
+  `Err(_)`, or things about normalizing error responses, and so on.
+
+[#1728](https://github.com/sebadob/rauthy/pull/1728)
+
+#### Discoverable Credentials
+
+Even though it was strongly discouraged up until now, Rauthy now supports Webauthn Discoverable
+Credentials (Resident Keys). The reason it was discouraged (and still is by default) is that it had
+the possibility in the past to brick some hardware devices when the available storage slots were
+exceeded and not handled properly.
+
+There are a few reasons why I decided to implement it now:
+
+- The default is still "the old way": Passkey yes, but not creating a resident key, and therefore
+  not consuming a storage slot on the device.
+- The user now has the choice. The default option is a "normal" Passkey. When a Resident Key is
+  selected, the user will see a warning about the storage on the device, and that it's the users
+  responsibility to manage it. This can be ignored for all software keys, but is important for
+  "real" passkeys like Yubikeys.
+- Some software implementations (e.g. Apple) do not work with discouraged Resident Keys (which is
+  pretty stupid, but that's how it works). Having compatibility in these cases was another reason.
+
+If a user has a Resident Key, it can be used as a normal Passkey just like it behaves now, but it
+can also be used during logins via the new "Passkey" button. When pressed, you don't even need to
+provide your E-Mail anymore. All data is looked up via the Resident Keys `cred_id` and the
+Rauthy-provided `user_handle`.
+
+The Passkeys list now also shows a small indicator if a Passkey is also a Resident Key. This does
+NOT automatically work for already registered keys. If you want to change your current Passkey to a
+Resident Key (if your device actually supports it), you need to re-register it with the Resident Key
+option selected.
+
+There are no config values. Everything is the users choice to provide as much compatibility as
+possible.
+
+[#1715](https://github.com/sebadob/rauthy/pull/1715)
+
+#### FIDO Device Attestation
+
+In addition to the new discoverable credentials, we now also have FIDO device attestation. You
+usually only want to set this in environments you have under control, like business-internal, were
+you can dictate the Passkeys being used. However, you can also use it on a public instance if you
+really care about security. Setting any device attestion will rule out most authenticators "normal"
+users use, like browser extensions, and so on. There are currently only ~340 Authenticators in
+existence that actually provide certificates and can be verified. You usually only find this for
+proper hardware authenticators like Yubikeys.
+
+If you ever set this on a public instance, you should never bump up the requirements when you
+already have registered users, or you need to plan some migration and give them a deadline to
+upgrade. Enforcing attestation when users already have lower security ones registered, and no proper
+one, will lock them out of their account otherwise.
+
+If you, however, set the requirements directly from the beginning, the user will see proper error
+messages during registration if their device does not meet the minimum security requirements.
+
+You can now enforce different certification levels, key protection levels, and how authenticators
+are attached. For instance, you can enforce that users can only use dedicated, external
+authenticators that are separate from the machine they are logging-in from. USB keys count as such
+of course, since they are completely separate units. Be careful with the certification levels. Most
+currently existing ones are either L1 or L2, almost none L3 yet.
+
+You have some new config options. If you set any of these, attestation will be enforced.
+
+**CAUTION: Device attestion does only work during registration! We can validate the different
+levels and requirements during each authentication, and you can change them later, but only during
+the registration, we can verify that the authenticator actually signed the `authData` with the
+correct private key, that we then verify via the certificate chain from the FIDO MDS. This means if
+you want to enforce this for an already running application, you MUST plan a migration phase. If you
+just flick the switch, basically all users with registered keys will be locked out.**
+
+```toml
+[webauthn]
+# When you want to migrate an existing deployment over to enforced
+# attestation, you usually have a chicken-and-egg problem: You
+# have users that already use Passkeys. Device attestation only
+# works during the registration ceremony. When devices are only
+# ever attested with enforcement, either all users need to remove
+# the passkeys, leaving all their accounts password-only, and then
+# re-registert, or they would be locked out as soon as attestation
+# would be enforced.
+#
+# To counter this, you can enable optimistic_attestation. This will
+# always try to attest devices during registration and use a plain
+# fallback on error. This is opt-in on purpose. It requires a bit
+# more resources and memory, and it does not make any sense to
+# enable it when you never plan to enforce attestation at some point.
+# Just the optimistic attestation on its own does not increase the
+# security. It helps you migrate users.
+#
+# Once enabled, you can give your users a grace-period in which
+# they need to re-register their passkeys. When that is done, and
+# they see the "Certified Passkey" badge in their account dashboard,
+# you can then switch to enforced attestation.
+#
+# default: false
+# overwritten by: WEBAUTHN_OPT_ATTESTATION
+optimistic_attestation = false
+
+######################################################################
+## The block below enforces passkey attestation. You can set different
+## combinations of
+##
+## - force_passkey_cert_level
+## - force_passkey_protection
+## - force_passkey_attachment
+##
+## If any of these values are set, authenticator attestation will
+## be enforced. This will immediately reject most of the software
+## passkeys like in browser extensions.
+##
+## Note: You probably never want these setting on any public-facing
+## instance, as it will allow only properly validarted Passkeys.
+## That basically excludes almost all software-based keys. If you
+## don't control what keys your users are using, like e.g. in an
+## enterprise, you probably don't want this feature.
+## Even if the examples for certification levels also mention
+## software implementations, most software passkeys are not
+## certified at all, and they don't send attestation data. Only
+## because a device meets the needs for a specific level does not
+## mean it's actually certified.
+##
+## For more information on the different security levels:
+## https://fidoalliance.org/certification/authenticator-certification-levels/
+## https://fidoalliance.org/security-certification-authenticator-security-levels/
+##
+## CAUTION: If you make the requirements more strict for an
+## already existing deployment, you can lock accounts! If a
+## user has registered keys that do not meet the new standards,
+## it will be impossible to log in, and this needs manual cleanup
+## from an Admin!
+
+# Enforces FIDO passkey attestation. If not set, attestation is
+# disabled. If you set a level, it is a minimum requirement. E.g.
+# L1 is a boundary for the minimum, and it means L1 and above.
+# The possible levels (case-sensitive) in ascending order:
+#
+# - FIDO_CERTIFIED
+# - FIDO_CERTIFIED_L1
+# - FIDO_CERTIFIED_L1plus
+# - FIDO_CERTIFIED_L2
+# - FIDO_CERTIFIED_L2plus
+# - FIDO_CERTIFIED_L3
+# - FIDO_CERTIFIED_L3plus
+#
+# default: not set
+# overwritten by: WEBAUTHN_PK_CERT_LEVEL
+force_passkey_cert_level = 'FIDO_CERTIFIED_L1'
+
+# Enforces the passkey protection to be included in the given
+# list. Authenticators will send an array of values, so this
+# is not a hard equality check. Instead, the values sent by the
+# authenticator mut be a subset of the configured value. E.g.
+# the authenticator sends `['hardware', 'tee']` then a
+# configured value of ['hardware', 'tee', 'secure_element']
+# would allow it. If, however, the authenticator sent
+# `['hardware', 'remote_handle']`, it would be rejected.
+#
+# Possible values:
+# - software
+# - hardware
+# - tee
+# - secure_element
+# - remote_handle
+#
+# default: not set
+# value type: [String]
+# overwritten by: WEBAUTHN_PK_PROT (`\n` separated values)
+force_passkey_protection = ['hardware', 'tee', 'secure_element']
+
+# This works in the same way as `force_passkey_protection`
+# above. The configured value must be a superset of the array
+# of values that an authenticator might send. For instance,
+# to allow only external, dedicated authenticators that must
+# not use any radio technology, specify: `['external', 'wired']`
+#
+# Possible values:
+# - internal
+# - external
+# - wired
+# - wireless
+# - nfc
+# - bluetooth
+# - network
+# - wifi_direct
+# - smart
+#
+# Note: `smart` stands for SmartCard. `internal` means "on
+# the same physical device", while `external` requires an
+# independent one.
+#
+# default: not set
+# value type: [String]
+# overwritten by: WEBAUTHN_PK_ATT (`\n` separated values)
+force_passkey_attachment = ['external', 'nfc', 'wired', 'wireless']
+```
+
+> Consider this feature as beta for this release. I did lots of testing, but only with "real"
+> Passkeys like Yubieys. I never did any software-based stuff, which will probably not work anyway
+> because of the missing certifications.
+
+[#1751](https://github.com/sebadob/rauthy/pull/1751)
+
+#### Improved Password Hashing
+
+Rauthy is now using the latest release of `argon2`. That version finally brings the `parallel`
+feautre, which is activated now. This means that if you have multiple cores available for your
+hasing (set in combination with `hashing.max_hash_threads`), you will get a huge speed boost. The
+`p_cost` can now be fully utilized, as long as you have the cores available. This on its own does
+not bump the security, but it reduces the time taken for hashing, which on the other hand means you
+can bump the `m_cost` (if you have the memory) or the `t_cost` higher. This will keep the same UX
+during logins, but with increased password hash strength.
+
+> Just as a reference: on my test machine with `m_cost=131072` and `p_cost=8`, I needed a `t_cost`
+> of `24` to get to ~1 second of time taken for hashing. With the `parallel` feature enabled, I was
+> able to set `t_cost=138` for the same time, which is an improvement by 5.75x.
+
+[#1741](https://github.com/sebadob/rauthy/pull/1741)
+
+#### OTP
+
+Rauthy now supports One Time Passwords (OTP) via E-Mail. Since the security of them if a lot lower
+than Passkeys, this feature is opt-in and disabled by default.
+
+If a user has both Passkeys and OTP registered, Passkeys will always be preferred. In these
+situations, the user can currently not choose which factor to use. It will automatically request a
+Passkey, and the OTP will be kind of a fallback, e.g. when an Admin deletes a lost Passkey. Making
+it possible to choose freely might be a future addon.
+
+```toml
+[otp]
+# Enable E-Mail or HMAC-based One Time Passwords as 2FA.
+#
+# CAUTION: Passkeys are much safer than OTP. Only enable
+# OTP if you really need / want to.
+#
+# default: 'false'
+# overwritten by: OTP_ENABLE
+enable = false
+
+# The length of the generated one-time passwords.
+# Must be 6 - 8 digits.
+#
+# default: 6
+# overwritten by: OTP_LENGTH
+length = 6
+
+# The lifetime for OTP requests. Within this time, an
+# OTP request must have been validated.
+#
+# type: duration
+# default: '5m'
+# overwritten by: OTP_EXP_MINS
+exp = '5m'
+
+# Default digest algorithm's length, HMAC using SHA-X.
+# SHA-1 is forbidden.
+#
+# NOTE: This value currently has no effect. It's a 
+# preparation for future support for TOTP. At the time
+# of writing, only E-Mail-based OTP is implemented.
+#
+# Possible values: 256, 384, 512
+# default: 512
+# overwritten by: OTP_DIGEST_LEN_DEFAULT
+digest_len_default = 512
+
+# The expiration duration when an MFA cookie set via OTP
+# must be revalidated.
+#
+# While such a cookie exists and is valid, a user may not
+# need to provide a password on a new login on this known
+# device, only a new OTP.
+#
+# You can disable this feature by setting the value to 0.
+#
+# type: duration
+# default: '30d'
+# overwritten by: OTP_RENEW_EXP
+renew_exp = '30d'
+
+[otp.email]
+# Wether to enable or disable OTPs via E-Mail.
+# This value is ignored if `otp.enable` is set to `false`.
+#
+# default: 'true'
+# overwritten by: OTP_EMAIL_ENABLE
+enable = true
+```
+
+[#1620](https://github.com/sebadob/rauthy/pull/1620)  
+[#1705](https://github.com/sebadob/rauthy/pull/1705)
+
+#### Updated Validation Regexes
+
+Validation Regexes for both user given and family name, and also for client names were updated once
+again. Instead of even trying to define all possible ranges in all languages, we are now relying on
+automatic resolution. All control characters, possibly dangerous and nonsense chars like emojis are
+still forbidden, but apart from that, it's a lot more loose. The new definition is the following:
+
+```
+RE_USER_NAME:   ^[\p{L}\p{M}\p{N}\p{Zs}'.-]{1,32}$
+RE_CLIENT_NAME: ^[\p{L}\p{M}\p{N}\p{Zs}()._-]{2,128}$
+```
+
+The regex for KV store keys was made quite a bit more strict. This was necessary since the key is
+used as a path segment in API calls. This is only important when you used the KV store API manually.
+
+The validation is now the following:
+
+```
+r"^[a-zA-Z0-9-._~]{2,64}$"
+```
+
+There is also a new one. A stricter version of `RE_URI`, that makes sure the given URI always has a
+host part. This is necessary for e.g. `redirect_uri`s in different places, and so on. Technically,
+it's a breaking change, but it should not be one if you provided proper URLs anyway.
+
+```
+RE_CLIENT_URI: ^(?:[a-zA-Z][a-zA-Z0-9+.\-]*://)?[a-zA-Z0-9](?:[a-zA-Z0-9._\-]{0,253}[a-zA-Z0-9])?(?::[0-9]{1,5})?(?:[/?][a-zA-Z0-9.:/_\-&?=~!$'()*+%@]*)?$
+```
+
+[#1708](https://github.com/sebadob/rauthy/pull/1708)
+[#1728](https://github.com/sebadob/rauthy/pull/1728)
+[#1743](https://github.com/sebadob/rauthy/pull/1743)
+
+#### Theme CSS uses explicit percent units
+
+The generated theme CSS now writes saturation and lightness with an explicit `%`, so a color is
+emitted as `--action: 34 100% 40%` rather than `--action: 34 100 40`. Unitless values inside `hsl()`
+are a CSS Color 4 addition supported from Safari 18, Chrome 121 and Firefox 122. Browsers below that
+drop the whole declaration, which left buttons with no background while `--btn-text` still applied,
+rendering them invisible. It affects every iOS below 18, where no alternative browser engine is
+available.
+
+If you use a custom theme, save it once after upgrading even if you change nothing. That updates the
+theme's timestamp, which is what busts the long-lived client-side cache for the generated CSS.
+
+[#1706](https://github.com/sebadob/rauthy/pull/1706)
+
+#### More resilient Password Expiry E-Mails
+
+The E-Mail reminders about an expiring password could get lost when the SMTP server was not working
+properly and all retries were exceeded. Sent reminders are not remembered and saved into the DB, and
+the scheduler will run more often. It will be able to pick up failed attempts and retry. This should
+make these mails a lot more resilient.
+
+In addition, you can now configure the time when users will be reminded of an expiring password:
+
+```toml
+[email.jobs]
+# Configure the time left when to send a reminder E-Mail
+# before a password expiration for a user password.
+#
+# NOTE: When you change this value for an already running
+# instance, users might receive duplicate emails.
+#
+# type: duration
+# default: '10d'
+# overwritten by: EMAIL_PWD_EXP
+password_exp = '10d'
+```
+
+[#1721](https://github.com/sebadob/rauthy/pull/1721)
+
+#### RFC 9207 Issuer Identification
+
+Every authorization response redirect, both the `code` success and the `error=login_required`
+response for `prompt=none`, now carries the `iss` parameter. The discovery documents advertise
+`authorization_response_iss_parameter_supported: true`. Clients can use it to defend against mix-up
+attacks when they talk to multiple authorization servers.
+
+All redirect query params are now built in one place and are properly encoded, so a `state`
+containing e.g. `&iss=...` cannot inject its own parameters. The login UI no longer encodes `state`
+itself, which means it is encoded exactly once on the backend. A space is still sent as `%20`.
+
+[#1757](https://github.com/sebadob/rauthy/pull/1757)
+
+#### Home / Back button on Account Dashboard
+
+You can now link to the account dashboard from your external application, and provide a
+`redirect_uri`. If it is a valid one that is registered for a client inside Rauthys DB, you will
+then see a Home / Back button in the top left corner. A user can click that to have a way back to
+your external app.
+
+[#1743](https://github.com/sebadob/rauthy/pull/1743)
+
+#### `resource` is carried through Auth Provider logins
+
+RFC 8707: `resource` is now carried through upstream-provider logins. This fixes e.g. Claude's MCP
+connector in combination with Upstream Auth Providers.
+
+[#1703](https://github.com/sebadob/rauthy/pull/1703)
+
+#### `resource` for Dynamic and Ephemeral Clients
+
+You can now allow specific resources for dynamic and ephemeral clients.
+
+```toml
+[dynamic_clients]
+# RFC 8707 resource indicators a dynamically registered client may request. A
+# dynamic client cannot declare `allowed_resources` itself, so without this it can
+# never request a `resource`; an MCP client, which must send one, would otherwise
+# get `invalid_target`. Resolved from the live config on every request and never
+# stored with the client. Entries are matched verbatim. An empty list keeps the
+# default deny.
+#
+# default: []
+# overwritten by: DYN_CLIENT_ALLOWED_RESOURCES - single String, \n separated values
+#allowed_resources = []
+
+[ephemeral_clients]
+# RFC 8707 resource indicators allowed when an ephemeral client document declares
+# none of its own (a CIMD document you do not control cannot declare them). Keeps
+# the default deny without the blunt `danger_allow_unvalidated_resource`. A document
+# that declares its own resources still wins. Resolved from the live config on every
+# request. Entries are matched verbatim.
+#
+# default: []
+# overwritten by: EPHEMERAL_CLIENTS_ALLOWED_RESOURCES - single String, \n separated values
+#allowed_resources = []
+```
+
+[#1686](https://github.com/sebadob/rauthy/pull/1686)
+
+#### API Key Passkey Deletion
+
+API Keys with `Users` + `Delete` can now call `DELETE /auth/v1/users/{id}/webauthn/delete/{name}`.
+
+[#1713](https://github.com/sebadob/rauthy/pull/1713)
+[#1713](https://github.com/sebadob/rauthy/pull/1713)
+
+#### `nbf` during Token Revocation
+
+The `nbf` claim is now ignored when you try to revoke a `refresh_token`. This is necessary, because
+by default they have their `nbf` set to `access_token.exp - 60`. Revokking a token though is always
+"safe".
+
+[#1740](https://github.com/sebadob/rauthy/pull/1740)
+
+#### Color Picker in the Branding Editor
+
+The color preview next to each HSL slider group in the Admin UI branding editor is now a native
+color picker. It makes it possible to pick a color or enter it as RGB or hex, which is then
+converted into the HSL values the theme uses.
+
+[#1750](https://github.com/sebadob/rauthy/pull/1750)
+
+#### `Ed25519` Token Signature
+
+The `Ed25519` identifier was added for signing tokens in the client config. This is actually the
+exact same as `EdDSA`, which is the default. The only difference is that it is more specific. There
+is a newer RFC 9864 that specifies these. This identifier can be set on clients that validate tokens
+based on RFC 9864 instead of the (still current standard) `EdDSA` value.
+
+If a client has issues fetching the JWKS, you can provide a custom query param `rfc_9864=true` to
+the URL which will then re-formad `EdDSA` as `Ed25519`.
+
+[#1719](https://github.com/sebadob/rauthy/pull/1719)
+
+#### Sponsoring Notification
+
+Rauthy will send a notification once a year that kindly asks for a sponsoring or a donation in a
+similar way like KDE does it. It will not annoy you and never reach any normal user or group admin.
+It will do this if your instance is running between 6th and 28th of december.
+
+If you don't want to support the project, or you already do, you can disable this.
+
+```toml
+[sponsor]
+# Rauthy will send en E-Mail to the Rauthy admin, and to possibly
+# configured event notification targets, once a year. This message
+# kindly asks for sponsoring the project. As said, it will only be
+# sent once a year in the time between 6th and 28th of december. It 
+# will send it to the configured `rauthy_admin_email` and possibly
+# existing `contacts` on the `rauthy` client. In addition, it will
+# create an event notification to Slack / Matrix, if it exists.
+# If none of that is true, it will instead send a mail to the max
+# 5 oldest `rauthy_admin` role accounts in the database.
+#
+# It will never annoy you or keep on asking. It's one notification
+# once a year, in the same way as KDE does it as well. This message
+# will never reach any normal user or group admin.
+#
+# If you do not want to support the project, or you already do,
+# you can disable this setting.
+#
+# default: false
+# overwritten by: SPONSOR_EMAIL_REMINDER_DISABLE
+email_reminder_disable = false
+```
+
+[#1759](https://github.com/sebadob/rauthy/pull/1759)
+
+### Bugfix
+
+- The last color stop of the hue slider in the Admin UI branding editor used a hue of `3600`
+  instead of `360`, so the gradient ended on red instead of spanning the full spectrum.
+  [#1706](https://github.com/sebadob/rauthy/pull/1706)
+- Theme validation checked `accent` twice and never validated `action`.
+  [#1706](https://github.com/sebadob/rauthy/pull/1706)
+- The SSE event listeners were keyed by IP internally. This was a left-over from the very old days.
+  The issue with this was that it was not possible to listen from multiple sources that share the
+  same IP without them evicting each other all the time.
+  [#1728](https://github.com/sebadob/rauthy/pull/1728)
+- Accept an optional PKCE challenge from confidential dynamic clients
+  [#1682](https://github.com/sebadob/rauthy/pull/1682)
+- `--border-radius` from custom branding was not used for the login card.
+  [#1704](https://github.com/sebadob/rauthy/pull/1704)
+- Reset a manually initialized users password if a passkey was added with the initial link.
+  [#1707](https://github.com/sebadob/rauthy/pull/1707)
+- `/register` endpoint was missing CORS headers.
+  [#1717](https://github.com/sebadob/rauthy/pull/1717)
+
 ## v0.36.2
 
 ### Security
@@ -2520,7 +3565,7 @@ country and depending on the chosen DB type also the city will be added to the E
 # set this to `true`.
 #
 # default: false
-# overwritten by: GEO_BLOCK_UNKONW
+# overwritten by: GEO_BLOCK_UNKNOWN
 block_unknown = false
 
 # If you have a WAF or CDN which injects a geoloaction header

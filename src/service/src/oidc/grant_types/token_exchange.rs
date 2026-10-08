@@ -13,6 +13,7 @@ use rauthy_error::{ErrorResponse, ErrorResponseType};
 use rauthy_jwt::claims::{ActClaim, JwtAccessClaims, JwtTokenType};
 use rauthy_jwt::token::JwtToken;
 use std::str::FromStr;
+use std::time::Duration;
 
 /// RFC 8693 token exchange.
 ///
@@ -209,7 +210,7 @@ pub async fn grant_type_token_exchange(
         user.as_ref(),
         &client,
         dpop_fingerprint,
-        TokenScopes(scope),
+        TokenScopes::new(scope),
         target,
         act,
     )
@@ -246,9 +247,15 @@ async fn validate_exchange_token<'a>(
         ));
     }
 
-    if JwtToken::validate_claims_into(token, Some(JwtTokenType::Bearer), 0, buf)
-        .await
-        .is_err()
+    if JwtToken::validate_claims_into(
+        token,
+        Some(JwtTokenType::Bearer),
+        Duration::from_secs(0),
+        buf,
+        false,
+    )
+    .await
+    .is_err()
     {
         return Err(ErrorResponse::new(
             ErrorResponseType::InvalidGrant,
