@@ -87,18 +87,20 @@ pub async fn get_authorize(
     // challenge when submitting the login form. Keeping `AuthRequest` in its upstream
     // shape (non-optional fields) minimizes the merge surface on every upstream sync.
     let is_default_mode = params.is_none();
-    let params = params.map(|q| q.into_inner()).unwrap_or_else(|| AuthRequest {
-        client_id: String::from("rauthy"),
-        redirect_uri: format!("{}oidc/callback", RauthyConfig::get().issuer),
-        response_type: String::from("code"),
-        scope: String::from("openid profile email"),
-        state: None,
-        code_challenge: None,
-        code_challenge_method: None,
-        max_age: None,
-        prompt: None,
-        resource: None,
-    });
+    let params = params
+        .map(|q| q.into_inner())
+        .unwrap_or_else(|| AuthRequest {
+            client_id: String::from("rauthy"),
+            redirect_uri: format!("{}oidc/callback", RauthyConfig::get().issuer),
+            response_type: String::from("code"),
+            scope: String::from("openid profile email"),
+            state: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            max_age: None,
+            prompt: None,
+            resource: None,
+        });
     params.validate()?;
 
     let principal = principal.into_inner();
