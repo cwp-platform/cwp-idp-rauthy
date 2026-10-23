@@ -5,7 +5,8 @@ name: ci
 
 on:
   push:
-    branches: ['v*']
+    # Указание владельца: Actions запускает только создание ТЕГА (пуш в ветку — нет).
+    tags: ['*']
   workflow_dispatch:
 
 env:
