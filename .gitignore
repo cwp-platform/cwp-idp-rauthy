@@ -24,3 +24,12 @@ heaptrack.*
 static
 templates/html
 gen-config.toml
+
+# ── cwp fork additions (не терять при синхронизации с upstream) ──
+# Компилированный UI-архив — собирается из исходников при билде (см. ci.yml / just build-ui).
+assets/static_html/
+# Локальные артефакты сборки/загрузки (в upstream-версии .gitignore не покрыты).
+.cargo-registry-cache/
+**/*.log
+/assets/fido_mds/dataset.bin
+/data_old
