@@ -1,8 +1,5 @@
-# Taskfile.yml — сборка cwp-idp-rauthy (единый формат Taskfile репозиториев монорепо).
-# Единая точка версии — CWP_INFRA_REF (cwp-infra). Артефакт стенда (rauthy: UI + бинарь)
-# собирается НАТИВНО (cargo/npm) на хосте; docker-образ (Dockerfile) лишь ПАКУЕТ готовый
-# out/rauthy_amd64 — упаковка вызывается `compose build` ПОСЛЕ этой задачи (deploy-local.sh).
-# Внешние builder-образы для сборки не используются.
+# cwp-idp-rauthy — Taskfile (go-task). Workflow-паритет с сервисами монорепо.
+# Версия — из cwp-infra (CWP_INFRA_REF); форк — IdP, контракты cwp-specs не потребляет (OIDC/OAuth2).
 
 version: '3'
 
@@ -16,9 +13,6 @@ includes:
 
 vars:
   CWP_INFRA_REF: 'v0.3'
-  RELEASE_TARGET: 'x86_64-unknown-linux-gnu'
-  FIDO_MDS_SOURCE: 'https://mds.fidoalliance.org/'
-  FIDO_MDS_ASSET: 'assets/fido_mds/dataset.bin'
 
 tasks:
   bootstrap:
@@ -27,7 +21,6 @@ tasks:
     cmds:
       - |
         set -e
-        # CWP_GH_BASE: окружение (CI/export) доминирует; иначе — локальные настройки (.env/../.env).
         if [ -z "${CWP_GH_BASE:-}" ]; then
           for f in ".env" "../.env"; do
             [ -f "$f" ] || continue
@@ -45,33 +38,17 @@ tasks:
           git -c advice.detachedHead=false clone --depth 1 --branch {{.CWP_INFRA_REF}} "$INFRA_REPO" .cwp-infra
         fi
 
-  build:ui:
-    silent: true
-    desc: "Сборка SPA (vite) → static/v1 + templates/html (встраивается в бинарь rust_embed)"
-    cmds:
-      - mkdir -p templates/html static/v1
-      - rm -rf static/v1/* templates/html/*
-      - cd frontend && npm install && npm run build
-
-  fido-mds-prep:
-    silent: true
-    desc: "FIDO MDS dataset → assets/fido_mds/dataset.bin (нужен релизной сборке)"
-    cmds:
-      - cargo run --bin fido-mds-prep -- --source {{.FIDO_MDS_SOURCE}} --out {{.FIDO_MDS_ASSET}}
-
   build:
-    silent: true
-    desc: "Сборка rauthy (debug): UI + бинарь"
-    deps: [build:ui]
+    desc: "Сборка rauthy (cargo build)"
     cmds:
       - cargo build --bin rauthy
 
   build:release:
-    silent: true
-    desc: "Релизная сборка → out/rauthy_amd64 (упаковывается образом через `compose build`)"
-    deps: [build:ui]
+    desc: "Релизная сборка → out/rauthy_amd64 (упаковывается Dockerfile'ом)"
     cmds:
-      - test -f {{.FIDO_MDS_ASSET}} || task fido-mds-prep
-      - cargo build --release --target {{.RELEASE_TARGET}} --bin rauthy
+      - cd frontend && npm install && npm run build
+      - cargo run --bin fido-mds-prep -- --source https://mds.fidoalliance.org/ --out assets/fido_mds/dataset.bin
+      - cargo build --release --target x86_64-unknown-linux-gnu --bin rauthy
       - mkdir -p out/empty
-      - cp target/{{.RELEASE_TARGET}}/release/rauthy out/rauthy_amd64
+      - cp target/x86_64-unknown-linux-gnu/release/rauthy out/rauthy_amd64
+      - cp target/x86_64-unknown-linux-gnu/release/rauthy target/release/cwp-idp-rauthy
