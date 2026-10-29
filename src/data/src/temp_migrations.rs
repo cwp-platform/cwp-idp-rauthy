@@ -1,52 +1,54 @@
-use crate::database::DB;
-use crate::entity::roles::Role;
-use hiqlite::macros::params;
-use rauthy_common::constants::RAUTHY_ADMIN_GROUP_PREFIX;
-use rauthy_common::is_hiqlite;
+use crate::entity::clients::Client;
+use rauthy_common::validation::validate_redirect_uri;
 use rauthy_error::ErrorResponse;
-use tracing::{info, warn};
+use semver::Version;
+use tracing::{error, warn};
 
-pub async fn apply_temp_migrations() -> Result<(), ErrorResponse> {
-    // cleanup possibly lingering PAM user groups
-    let sql = r#"
-DELETE FROM pam_groups
-WHERE typ = 'user' AND NOT EXISTS (
-    SELECT 1 FROM pam_users
-    WHERE pam_users.name = pam_groups.name
-)"#;
-    let rows_affected = if is_hiqlite() {
-        DB::hql().execute(sql, params!()).await?
-    } else {
-        DB::pg_execute(sql, &[]).await?
-    };
-    if rows_affected > 0 {
-        info!("Cleaned up {rows_affected} lingering PAM Groups from and older cleanup bug");
-    }
-
-    warn_existing_group_admin_roles().await?;
+pub async fn apply_temp_migrations(
+    _previous_db_version: Option<Version>,
+) -> Result<(), ErrorResponse> {
+    warn_invalid_redirect_uris().await;
 
     Ok(())
 }
 
-/// The delegated group-admin feature reads roles named `rauthy_admin:<prefix>`
-/// as group admins. This is non-breaking unless such a role already existed before the
-/// upgrade, in which case its holders silently gain group-admin rights. We warn about
-/// any matching role on each startup for the whole `v0.36` cycle so operators can spot
-/// an unintended collision; roles created intentionally afterwards can ignore it.
-async fn warn_existing_group_admin_roles() -> Result<(), ErrorResponse> {
-    let found = Role::find_all()
-        .await?
-        .into_iter()
-        .filter(|r| r.name.starts_with(RAUTHY_ADMIN_GROUP_PREFIX))
-        .map(|r| r.name)
-        .collect::<Vec<_>>();
-    if !found.is_empty() {
-        warn!(
-            "Found custom roles matching the delegated group-admin scheme \
-            `rauthy_admin:<prefix>`: {found:?}. Their holders are now group admins for \
-            the matching groups. If you created these intentionally, you \
-            can safely ignore this warning."
-        );
+/// Redirect URIs with a fragment, a `,` or a reserved query key (`code`, `state`, `iss`, ...) are
+/// rejected since v0.37 (RFC 6749 §3.1.2, RFC 9207), and so are post-logout redirect URIs with a
+/// fragment, a `,` or a `state` query key. A client stored before may still contain one: an
+/// authorization or logout request with it is rejected, and the client can only be updated once
+/// the URI is replaced. Only logs and never fails the startup.
+async fn warn_invalid_redirect_uris() {
+    let clients = match Client::find_all().await {
+        Ok(clients) => clients,
+        Err(err) => {
+            error!("Cannot load clients to check their redirect URIs: {err}");
+            return;
+        }
+    };
+
+    for client in clients {
+        for uri in client.get_redirect_uris() {
+            if let Err(err) = validate_redirect_uri(&uri, true, true) {
+                warn!(
+                    "Client '{}' has an invalid redirect URI '{}': {}. Authorization \
+                requests with it are rejected and the client cannot be updated until the URI is \
+                replaced (breaking change, RFC 6749 §3.1.2).",
+                    client.id, uri, err.message
+                );
+            }
+        }
+
+        if let Some(post_logout) = client.get_post_logout_uris() {
+            for uri in post_logout {
+                if let Err(err) = validate_redirect_uri(&uri, true, true) {
+                    warn!(
+                        "Client '{}' has an invalid post-logout redirect URI '{}': {}. Authorization \
+                requests with it are rejected and the client cannot be updated until the URI is \
+                replaced (breaking change, RFC 6749 §3.1.2).",
+                        client.id, uri, err.message
+                    );
+                }
+            }
+        }
     }
-    Ok(())
 }

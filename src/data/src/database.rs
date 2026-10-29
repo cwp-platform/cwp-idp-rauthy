@@ -1,4 +1,5 @@
 use crate::entity::db_version::DbVersion;
+use crate::fido_mds::dataset::MdsDataset;
 use crate::migration::db_migrate_dev::migrate_dev_data;
 use crate::migration::{anti_lockout, bootstrap, db_migrate};
 use crate::rauthy_config::RauthyConfig;
@@ -8,6 +9,7 @@ use rauthy_common::{is_hiqlite, is_postgres};
 use rauthy_error::ErrorResponse;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
+use semver::Version;
 use std::env;
 use std::ops::DerefMut;
 use std::sync::{Arc, OnceLock};
@@ -60,6 +62,7 @@ pub enum Cache {
     ToS,
     EmailRateLimit,
     CredStuffDetect,
+    OneTimePassword,
 }
 
 pub struct DB;
@@ -120,7 +123,7 @@ impl DB {
         stmt: &str,
         params: &[&(dyn postgres_types::ToSql + Sync)],
     ) -> Result<u64, ErrorResponse> {
-        let st = txn.prepare(stmt).await?;
+        let st = txn.prepare_cached(stmt).await?;
         let rows_affected = txn.execute(&st, params).await?;
         Ok(rows_affected)
     }
@@ -223,7 +226,8 @@ impl DB {
         Ok(())
     }
 
-    pub async fn migrate() -> Result<(), ErrorResponse> {
+    /// Applies migrations and returns the pre-migration DB version.
+    pub async fn migrate() -> Result<Option<Version>, ErrorResponse> {
         // before we do any db migrations, we need to check the current DB version
         // for compatibility
         let db_version = DbVersion::check_app_version().await?;
@@ -239,6 +243,10 @@ impl DB {
                 .expect("Error applying Postgres database migrations");
             debug!(?report, "Database Migration Report");
         }
+
+        // seed the embedded FIDO MDS dataset when its tables are still empty (fresh instance or
+        // an existing one upgrading into this version)
+        MdsDataset::seed_embedded().await?;
 
         // migrate dynamic DB data
         let config = RauthyConfig::get();
@@ -295,9 +303,9 @@ impl DB {
         }
 
         // update the DbVersion after successful pool creation and migrations
-        DbVersion::upsert(db_version).await?;
+        DbVersion::upsert(db_version.clone()).await?;
 
-        Ok(())
+        Ok(db_version)
     }
 }
 

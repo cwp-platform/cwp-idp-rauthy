@@ -1,11 +1,14 @@
 <script lang="ts">
-    import { formatDateFromTs, saveCsrfToken } from '$utils/helpers';
+    import { formatDateFromTs, normalizeClientUri, saveCsrfToken } from '$utils/helpers';
     import Button from '$lib5/button/Button.svelte';
     import WebauthnRequest from '$lib5/WebauthnRequest.svelte';
     import Input from '$lib5/form/Input.svelte';
     import LangSelector from '$lib5/LangSelector.svelte';
     import {
+        CLIENT_ID,
         IS_DEV,
+        PKCE_VERIFIER,
+        REDIRECT_URI,
         TPL_AUTH_PROVIDERS,
         TPL_CLIENT_FAVICON_UPDATED,
         TPL_CLIENT_LOGO_UPDATED,
@@ -16,6 +19,7 @@
         TPL_LOGIN_ACTION,
         TPL_ATPROTO_ID,
     } from '$utils/constants.js';
+    import { generateNonce, generatePKCE } from '$utils/pkce';
     import IconHome from '$icons/IconHome.svelte';
     import Main from '$lib5/Main.svelte';
     import ContentCenter from '$lib5/ContentCenter.svelte';
@@ -25,12 +29,14 @@
     import ThemeSwitch from '$lib5/ThemeSwitch.svelte';
     import type { AuthProviderTemplate } from '$api/templates/AuthProvider.ts';
     import InputPassword from '$lib5/form/InputPassword.svelte';
-    import type { MfaPurpose, WebauthnAdditionalData } from '$webauthn/types.ts';
+    import type { WebauthnAdditionalData } from '$mfa/webauthn/types.ts';
     import { fetchGet, fetchPost, type IResponse } from '$api/fetch';
     import type {
+        ActiveOtp,
         CodeChallengeMethod,
         LoginRefreshRequest,
         LoginRequest,
+        OtpLoginResponse,
         RequestResetRequest,
         WebauthnLoginResponse,
     } from '$api/types/authorize.ts';
@@ -46,9 +52,15 @@
     import TosAccept from '$lib/TosAccept.svelte';
     import type { ConsentAcceptRequest, ConsentPendingItem } from '$api/types/consents';
     import ConsentGate from '$lib/ConsentGate.svelte';
+    import AuthTabs from '$lib/AuthTabs.svelte';
+    import RegisterForm from '$lib/RegisterForm.svelte';
     import { execProviderLogin } from '$utils/login';
     import Modal from '$lib/Modal.svelte';
     import Loading from '$lib/Loading.svelte';
+    import OtpRequest from '$lib5/OtpRequest.svelte';
+    import type { MfaPurpose } from '$api/types/mfa';
+    import type { OtpAdditionalData } from '$mfa/otp/types';
+    import IconKey from '$icons/IconKey.svelte';
 
     const inputWidth = '18rem';
 
@@ -56,31 +68,41 @@
 
     let authorizeUrl = $derived(IS_DEV ? '/auth/v1/dev/authorize' : '/auth/v1/oidc/authorize');
 
-    let clientId = useParam('client_id').get();
+    // opened without any OIDC client params (`/auth/v1/oidc/authorize`) -> fall back to the
+    // account client flow (like `redirectToLogin`): client `rauthy`, account callback,
+    // freshly generated PKCE + nonce, state `account`.
+    const isDefaultMode = !useParam('client_id').get();
+
+    let clientId = useParam('client_id').get() || CLIENT_ID;
     let clientName = $state('');
     // we can't use undefined to avoid a JSON error in the Template component
     let clientFaviconUpdated = $state(-1);
     let clientLogoUpdated = $state(-1);
-    let clientUri = $state(IS_DEV ? '/auth/v1' : '');
-    let redirectUri = useParam('redirect_uri').get();
-    let nonce = useParam('nonce').get();
+    let clientUri = $state('');
+    let clientUriNormalized = $state('');
+    let redirectUri =
+        useParam('redirect_uri').get() ||
+        (typeof window !== 'undefined' ? window.location.origin + REDIRECT_URI : '');
+    let nonce = useParam('nonce').get() || (isDefaultMode ? generateNonce() : undefined);
     let idpHint = useParam('idp_hint').get();
     let scopes = useParam('scope').get()?.split(' ') || [];
+    let fwda = useParam('fwda').get() === 'true' || undefined;
 
-    let refEmail: undefined | HTMLInputElement = $state();
     let refPassword: undefined | HTMLInputElement = $state();
 
-    let stateParam = useParam('state').get();
+    let stateParam = useParam('state').get() || (isDefaultMode ? 'account' : undefined);
     let stateEncoded = $derived(stateParam ? encodeURIComponent(stateParam) : undefined);
-    let challenge = useParam('code_challenge').get();
-    let challengeMethod: CodeChallengeMethod = useParam(
-        'code_challenge_method',
-    ).get() as CodeChallengeMethod;
+    let challenge = $state(useParam('code_challenge').get());
+    let challengeMethod: CodeChallengeMethod = $state(
+        useParam('code_challenge_method').get() as CodeChallengeMethod,
+    );
     // RFC 8707 resource indicator forwarded into the login request
     let resource = useParam('resource').get();
     let existingMfaUser: undefined | string = $state();
     let providers: AuthProviderTemplate[] = $state([]);
     let mfaPurpose: undefined | MfaPurpose = $state();
+    let mfaKind: undefined | 'webauthn' | 'otp' = $state();
+    let activeOtps: undefined | ActiveOtp[] = $state();
 
     let isLoading = $state(false);
     let isAutoRefreshing = $state(false);
@@ -95,6 +117,22 @@
     let tooManyRequests = $state(false);
     let emailAfterSubmit = $state('');
     let isRegOpen = $state(false);
+
+    let activeTab: 'login' | 'register' = $state('login');
+
+    $effect(() => {
+        // open the register tab on demand via `?tab=register` (no page reload)
+        if (isRegOpen && useParam('tab').get() === 'register') {
+            activeTab = 'register';
+        }
+    });
+
+    function switchTab(tab: 'login' | 'register') {
+        activeTab = tab;
+        const url = new URL(window.location.href);
+        url.searchParams.set('tab', tab);
+        history.replaceState(null, '', url.toString());
+    }
 
     let atprotoId = $state('');
     let atprotoHandle = $state('');
@@ -119,9 +157,16 @@
     let hasAutoLoggedIn = false;
     let showModalUpdate = $state(false);
 
-    onMount(() => {
-        if (!needsPassword) {
-            refEmail?.focus();
+    onMount(async () => {
+        // unified page opened without an OIDC client: generate the PKCE challenge
+        // and keep the verifier for the account callback (same as `redirectToLogin`)
+        if (isDefaultMode && !challenge) {
+            const pkce = await generatePKCE();
+            if (pkce) {
+                localStorage.setItem(PKCE_VERIFIER, pkce.verifier);
+                challenge = pkce.challenge;
+                challengeMethod = 'S256';
+            }
         }
     });
 
@@ -198,6 +243,12 @@
         }
     });
 
+    $effect(() => {
+        if (clientUri) {
+            clientUriNormalized = normalizeClientUri(clientUri);
+        }
+    });
+
     async function createSessionDev() {
         let res = await fetchPost<SessionInfoResponse>('/auth/v1/oidc/session');
         if (res.body?.csrf_token) {
@@ -244,9 +295,10 @@
         const payload: LoginRefreshRequest = {
             client_id: clientId,
             redirect_uri: redirectUri,
-            state: stateEncoded,
+            state: stateParam,
             nonce: nonce,
             scopes,
+            fwda,
         };
         if (
             challenge &&
@@ -260,14 +312,23 @@
             payload.resource = resource;
         }
 
-        let res = await fetchPost<undefined | WebauthnLoginResponse>(
+        let res = await fetchPost<undefined | WebauthnLoginResponse | OtpLoginResponse>(
             '/auth/v1/oidc/authorize/refresh',
             payload,
         );
         await handleAuthRes(res);
     }
 
-    async function onSubmit(form?: HTMLFormElement, params?: URLSearchParams) {
+    function onPasskeyDiscover() {
+        mfaKind = 'webauthn';
+        mfaPurpose = 'Discover';
+    }
+
+    async function onSubmit(
+        form?: HTMLFormElement,
+        params?: URLSearchParams,
+        residentKeyToken?: string,
+    ) {
         if (isAtproto) {
             return providerLogin(atprotoId);
         }
@@ -288,13 +349,15 @@
         let pow = (await fetchSolvePow()) || '';
 
         const payload: LoginRequest = {
-            email,
+            email: email || undefined,
             pow,
             client_id: clientId,
             redirect_uri: redirectUri,
-            state: stateEncoded,
+            state: stateParam,
             nonce: nonce,
             scopes,
+            resident_key_token: residentKeyToken,
+            fwda,
         };
         if (
             challenge &&
@@ -327,17 +390,16 @@
             url = '/auth/v1/dev/authorize';
         }
 
-        let res = await fetchPost<undefined | WebauthnLoginResponse | ToSAwaitLoginResponse>(
-            url,
-            payload,
-            'json',
-            'noRedirect',
-        );
+        let res = await fetchPost<
+            undefined | WebauthnLoginResponse | ToSAwaitLoginResponse | OtpLoginResponse
+        >(url, payload, 'json', 'noRedirect');
         await handleAuthRes(res);
     }
 
     async function handleAuthRes(
-        res?: IResponse<undefined | WebauthnLoginResponse | ToSAwaitLoginResponse>,
+        res?: IResponse<
+            undefined | WebauthnLoginResponse | ToSAwaitLoginResponse | OtpLoginResponse
+        >,
     ) {
         isLoading = false;
         isAutoRefreshing = false;
@@ -356,13 +418,21 @@
             }
             await redirectWithConsentCheck(loc);
         } else if (res.status === 200) {
-            // -> all good, but needs additional passkey validation
+            // -> all good, but needs additional MFA validation
             err = '';
             let body = res.body;
             if (body && 'code' in body) {
                 mfaPurpose = { Login: body.code as string };
+                if ('active_otps' in body) {
+                    activeOtps = body.active_otps;
+                    mfaKind = 'otp';
+                } else {
+                    mfaKind = 'webauthn';
+                }
             } else {
-                console.error('did not receive a proper WebauthnLoginResponse after HTTP200');
+                console.error(
+                    'did not receive a proper OtpLoginResponse or WebauthnLoginResponse after HTTP200',
+                );
             }
         } else if (res.status === 205) {
             // -> all good, password only account, user needs to update some values
@@ -464,9 +534,11 @@
             nonce: nonce,
             code_challenge: challenge,
             code_challenge_method: challengeMethod,
+            resource: resource || undefined,
             provider_id: id,
             pkce_challenge: '',
             pow: '',
+            fwda,
             ...(isAtproto && { handle: atprotoHandle }),
         };
         execProviderLogin(payload).then(errMsg => {
@@ -480,6 +552,7 @@
         tosAcceptCode = '';
         tos = undefined;
         isLoading = false;
+        mfaKind = undefined;
         mfaPurpose = undefined;
     }
 
@@ -536,26 +609,42 @@
         consentAccepting = false;
     }
 
-    function onWebauthnError(error: string) {
+    function onMfaError(error: string) {
+        let isAttErr =
+            error.includes('certification level') ||
+            error.includes('key protection') ||
+            error.includes('attachment hint');
+        if (isAttErr) {
+            console.error(error);
+            err = t.account.passkeys.missingAttestation;
+        } else {
+            err = error;
+        }
+
         // If there is any error with the key, the user should start a new login process
         mfaPurpose = undefined;
-        err = error;
+        mfaKind = undefined;
     }
 
-    async function onWebauthnSuccess(data?: WebauthnAdditionalData) {
+    async function onMfaSuccess(data?: WebauthnAdditionalData | OtpAdditionalData) {
         if (!data) {
             // will be empty if the user needs to update values
             mfaPurpose = undefined;
+            mfaKind = undefined;
             showModalUpdate = true;
             return;
         }
 
         if ('loc' in data) {
             await redirectWithConsentCheck(data.loc as string);
+        } else if ('resident_key_token' in data) {
+            mfaPurpose = undefined;
+            onSubmit(undefined, undefined, data.resident_key_token as string);
         } else if ('tos_await_code' in data) {
             // login successful, but the user needs to accept updated ToS
             tosAcceptCode = data.tos_await_code as string;
             mfaPurpose = undefined;
+            mfaKind = undefined;
             fetchTos();
         }
     }
@@ -565,7 +654,10 @@
         let pow = (await fetchSolvePow()) || '';
 
         let payload: RequestResetRequest = { email, pow };
-        if (clientUri) {
+        // We don't want a redirect for Rauthy directly. Instead, leave it blank,
+        // so that the UI after a successful reset will use a relative redirect to
+        // the Account dashboard instead.
+        if (clientUri && clientId !== 'rauthy') {
             payload.redirect_uri = encodeURI(clientUri);
         }
 
@@ -614,8 +706,8 @@
                             updated={clientLogoUpdated > -1 ? clientLogoUpdated : undefined}
                         />
                     {/if}
-                    {#if clientUri}
-                        <a class="home" href={clientUri} aria-label="Client Home Page">
+                    {#if clientUriNormalized}
+                        <a class="home" href={clientUriNormalized} aria-label="Client Home Page">
                             <IconHome color="hsla(var(--text) / .9)" />
                         </a>
                     {/if}
@@ -625,194 +717,236 @@
                     <h2>{clientName || clientId}</h2>
                 </div>
 
-                {#if mfaPurpose}
-                    <!--
+                <AuthTabs {isRegOpen} {activeTab} onSwitch={switchTab}>
+                    {#snippet login()}
+                        {#if mfaPurpose}
+                            <!--
                     TODO we could pass in an optional loginCodeExp and make sure
                     it fits inside the exp returned inside the WebauthnRequest later on
                     to output proper logs in case of misconfiguration.
                     Another approach would be to check this in the backend and emit warning logs.
                     -->
-                    <WebauthnRequest
-                        purpose={mfaPurpose}
-                        onSuccess={onWebauthnSuccess}
-                        onError={onWebauthnError}
-                    />
-                {/if}
-
-                {#if !clientMfaForce}
-                    <Form action={authorizeUrl} {onSubmit}>
-                        <div class:emailMinHeight={!showPasswordInput}>
-                            {#if isAtproto}
-                                <Input
-                                    name="handle"
-                                    bind:value={atprotoHandle}
-                                    label="Handle / DID"
-                                    placeholder="Handle / DID"
-                                    pattern={PATTERN_ATPROTO_ID}
-                                    disabled={tooManyRequests}
-                                    width={inputWidth}
-                                    required
+                            {#if mfaKind == 'webauthn'}
+                                <WebauthnRequest
+                                    purpose={mfaPurpose}
+                                    onSuccess={onMfaSuccess}
+                                    onError={onMfaError}
                                 />
-                            {:else}
-                                <Input
-                                    bind:ref={refEmail}
-                                    typ="email"
-                                    name="email"
-                                    bind:value={email}
-                                    autocomplete="email"
-                                    label={t.common.email}
-                                    placeholder={t.common.email}
-                                    errMsg={t.authorize.validEmail}
-                                    disabled={tooManyRequests || clientMfaForce || isLoading}
-                                    onInput={onEmailInput}
-                                    width={inputWidth}
-                                    required
+                            {:else if mfaKind == 'otp' && activeOtps}
+                                <OtpRequest
+                                    {activeOtps}
+                                    purpose={mfaPurpose}
+                                    onSuccess={onMfaSuccess}
+                                    onError={onMfaError}
                                 />
                             {/if}
-                        </div>
-
-                        {#if showPasswordInput}
-                            <InputPassword
-                                bind:ref={refPassword}
-                                name="password"
-                                bind:value={password}
-                                autocomplete="current-password"
-                                label={t.common.password}
-                                placeholder={t.common.password}
-                                maxLength={256}
-                                disabled={tooManyRequests || clientMfaForce || isLoading}
-                                width={inputWidth}
-                                required
-                            />
-
-                            {#if showResetRequest && !tooManyRequests}
-                                <div class="forgotten">
-                                    <Button
-                                        ariaLabel={t.authorize.passwordForgotten}
-                                        invisible
-                                        onclick={handleShowReset}
-                                    >
-                                        {t.authorize.passwordForgotten}
-                                    </Button>
-                                </div>
-                            {/if}
-                        {:else}
-                            <!-- This only exists to help password managers to trigger an auto-fill  -->
-                            <input type="password" hidden aria-hidden="true" style:display="none" />
                         {/if}
 
-                        {#if !tooManyRequests && !clientMfaForce}
-                            {#if showReset && !isAtproto}
-                                <div class="btn flex-col">
-                                    <Button
-                                        ariaLabel={t.authorize.passwordRequest}
-                                        onclick={requestReset}
-                                    >
-                                        {t.authorize.passwordRequest}
-                                    </Button>
+                        {#if !clientMfaForce}
+                            <Form action={authorizeUrl} {onSubmit}>
+                                <div class:emailMinHeight={!showPasswordInput}>
+                                    {#if isAtproto}
+                                        <Input
+                                            name="handle"
+                                            bind:value={atprotoHandle}
+                                            label="Handle / DID"
+                                            placeholder="Handle / DID"
+                                            pattern={PATTERN_ATPROTO_ID}
+                                            disabled={tooManyRequests}
+                                            width={inputWidth}
+                                            required
+                                        />
+                                    {:else}
+                                        <Input
+                                            typ="email"
+                                            name="email"
+                                            bind:value={email}
+                                            autocomplete="email"
+                                            label={t.common.email}
+                                            placeholder={t.common.email}
+                                            errMsg={t.authorize.validEmail}
+                                            disabled={tooManyRequests ||
+                                                clientMfaForce ||
+                                                isLoading}
+                                            onInput={onEmailInput}
+                                            width={inputWidth}
+                                            required
+                                        />
+                                    {/if}
                                 </div>
-                            {:else}
+
+                                {#if showPasswordInput}
+                                    <InputPassword
+                                        bind:ref={refPassword}
+                                        name="password"
+                                        bind:value={password}
+                                        autocomplete="current-password"
+                                        label={t.common.password}
+                                        placeholder={t.common.password}
+                                        maxLength={256}
+                                        disabled={tooManyRequests || clientMfaForce || isLoading}
+                                        width={inputWidth}
+                                        required
+                                    />
+
+                                    {#if showResetRequest && !tooManyRequests}
+                                        <div class="forgotten">
+                                            <Button
+                                                ariaLabel={t.authorize.passwordForgotten}
+                                                invisible
+                                                onclick={handleShowReset}
+                                            >
+                                                {t.authorize.passwordForgotten}
+                                            </Button>
+                                        </div>
+                                    {/if}
+                                {:else}
+                                    <!-- This only exists to help password managers to trigger an auto-fill  -->
+                                    <input
+                                        type="password"
+                                        hidden
+                                        aria-hidden="true"
+                                        style:display="none"
+                                    />
+                                {/if}
+
+                                {#if !tooManyRequests && !clientMfaForce}
+                                    {#if showReset && !isAtproto}
+                                        <div class="btn flex-col">
+                                            <Button
+                                                ariaLabel={t.authorize.passwordRequest}
+                                                onclick={requestReset}
+                                            >
+                                                {t.authorize.passwordRequest}
+                                            </Button>
+                                        </div>
+                                    {:else}
+                                        <div class="btn flex-col">
+                                            <Button
+                                                type="submit"
+                                                ariaLabel={t.authorize.login}
+                                                onclick={() => onSubmit()}
+                                                isDisabled={email.length === 0}
+                                                {isLoading}
+                                            >
+                                                {t.authorize.login}
+                                            </Button>
+                                        </div>
+                                        {#if isAtproto}
+                                            <div class="btn flex-col">
+                                                <Button
+                                                    ariaLabel={t.common.cancel}
+                                                    level={2}
+                                                    onclick={toggleAtproto}
+                                                >
+                                                    {t.common.cancel}
+                                                </Button>
+                                            </div>
+                                        {/if}
+                                    {/if}
+                                {/if}
+                            </Form>
+
+                            {#if isRegOpen && !showResetRequest && !tooManyRequests && !isAtproto}
+                                <button
+                                    class="reg"
+                                    type="button"
+                                    onclick={() => switchTab('register')}
+                                >
+                                    {t.authorize.signUp}
+                                </button>
+                            {/if}
+                        {/if}
+
+                        {#if err}
+                            <div class="errMsg">
+                                {err}
+                            </div>
+                        {/if}
+
+                        {#if emailSuccess}
+                            <div class="success">
+                                {t.authorize.emailSentMsg}
+                            </div>
+                        {/if}
+
+                        {#if clientMfaForce}
+                            <div class="btn flex-col">
+                                <Button
+                                    ariaLabel="Account"
+                                    onclick={() => (window.location.href = '/auth/v1/account')}
+                                >
+                                    Account
+                                </Button>
+                            </div>
+                        {/if}
+
+                        {#if pendingConsents.length > 0}
+                            <ConsentGate
+                                {pendingConsents}
+                                bind:choices={pendingConsentChoices}
+                                error={consentErr}
+                                isLoading={consentAccepting}
+                                onConfirm={acceptPendingConsents}
+                            />
+                        {/if}
+
+                        {#if tos}
+                            <TosAccept
+                                {tos}
+                                {tosAcceptCode}
+                                onToSAccept={handleAuthRes}
+                                {onToSCancel}
+                            />
+                        {/if}
+
+                        {#if !clientMfaForce && providers.length > 0 && !isAtproto}
+                            <div class="providers flex-col gap-05">
+                                <div class="providersSeparator">
+                                    <div class="separator"></div>
+                                    <div class="loginWith">
+                                        <div>
+                                            {t.authorize.orLoginWith}
+                                        </div>
+                                    </div>
+                                </div>
+
                                 <div class="btn flex-col">
                                     <Button
-                                        type="submit"
+                                        level={2}
                                         ariaLabel={t.authorize.login}
-                                        onclick={() => onSubmit()}
+                                        onclick={onPasskeyDiscover}
                                         {isLoading}
                                     >
-                                        {t.authorize.login}
+                                        <div class="flex gap-05">
+                                            <IconKey width="1.2rem" />
+                                            Passkey
+                                        </div>
                                     </Button>
                                 </div>
-                                {#if isAtproto}
-                                    <div class="btn flex-col">
-                                        <Button
-                                            ariaLabel={t.common.cancel}
-                                            level={2}
-                                            onclick={toggleAtproto}
-                                        >
-                                            {t.common.cancel}
-                                        </Button>
-                                    </div>
-                                {/if}
-                            {/if}
-                        {/if}
-                    </Form>
 
-                    {#if isRegOpen && !showResetRequest && !tooManyRequests && !isAtproto}
-                        {#if clientUri}
-                            <a
-                                class="reg"
-                                href="/auth/v1/users/register?redirect_uri={clientUri}"
-                                target="_blank"
-                            >
-                                {t.authorize.signUp}
-                            </a>
-                        {:else}
-                            <a class="reg" href="/auth/v1/users/register" target="_blank">
-                                {t.authorize.signUp}
-                            </a>
-                        {/if}
-                    {/if}
-                {/if}
-
-                {#if err}
-                    <div class="errMsg">
-                        {err}
-                    </div>
-                {/if}
-
-                {#if emailSuccess}
-                    <div class="success">
-                        {t.authorize.emailSentMsg}
-                    </div>
-                {/if}
-
-                {#if clientMfaForce}
-                    <div class="btn flex-col">
-                        <Button
-                            ariaLabel="Account"
-                            onclick={() => (window.location.href = '/auth/v1/account')}
-                        >
-                            Account
-                        </Button>
-                    </div>
-                {/if}
-
-                {#if pendingConsents.length > 0}
-                    <ConsentGate
-                        {pendingConsents}
-                        bind:choices={pendingConsentChoices}
-                        error={consentErr}
-                        isLoading={consentAccepting}
-                        onConfirm={acceptPendingConsents}
-                    />
-                {/if}
-
-                {#if tos}
-                    <TosAccept {tos} {tosAcceptCode} onToSAccept={handleAuthRes} {onToSCancel} />
-                {/if}
-
-                {#if !clientMfaForce && providers.length > 0 && !isAtproto}
-                    <div class="providers flex-col gap-05">
-                        <div class="providersSeparator">
-                            <div class="separator"></div>
-                            <div class="loginWith">
-                                <div>
-                                    {t.authorize.orLoginWith}
-                                </div>
+                                {#each providers as provider (provider.id)}
+                                    <ButtonAuthProvider
+                                        ariaLabel={`Login: ${provider.name}`}
+                                        {provider}
+                                        onclick={isProviderAtProto(provider.id)
+                                            ? toggleAtproto
+                                            : providerLogin}
+                                        {isLoading}
+                                    />
+                                {/each}
                             </div>
-                        </div>
-                        {#each providers as provider (provider.id)}
-                            <ButtonAuthProvider
-                                ariaLabel={`Login: ${provider.name}`}
-                                {provider}
-                                onclick={isProviderAtProto(provider.id)
-                                    ? toggleAtproto
-                                    : providerLogin}
-                                {isLoading}
-                            />
-                        {/each}
-                    </div>
-                {/if}
+                        {/if}
+                    {/snippet}
+
+                    {#snippet register()}
+                        <RegisterForm
+                            embedded
+                            redirectUri={redirectUri || clientUri || ''}
+                            onBackToLogin={() => switchTab('login')}
+                        />
+                    {/snippet}
+                </AuthTabs>
 
                 <Modal bind:showModal={showModalUpdate} strict>
                     <p>{t.authorize.needsUserUpdate}</p>
@@ -854,7 +988,7 @@
         justify-content: center;
         max-width: 21rem;
         padding: 20px;
-        border-radius: 5px;
+        border-radius: var(--border-radius);
         border: 1px solid hsl(var(--bg-high));
         background: hsl(var(--bg));
     }
@@ -907,8 +1041,7 @@
     }
 
     .providersSeparator {
-        margin-top: 1rem;
-        margin-bottom: 0.5rem;
+        margin: 1rem 0 -0.5rem 0;
     }
 
     .separator {
@@ -922,7 +1055,13 @@
 
     .reg {
         margin-top: 0.5rem;
+        padding: 0.25rem 0.5rem;
+        background: none;
+        border: none;
+        cursor: pointer;
         color: var(--text);
+        font-size: 0.9rem;
+        text-decoration: underline;
     }
 
     .success {

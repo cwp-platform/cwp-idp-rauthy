@@ -1,5 +1,5 @@
 import { arrBufToBase64UrlSafe, base64UrlSafeToArrBuf } from './utils';
-import type { WebauthnRegFinishRequest, WebauthnRegStartRequest } from '$webauthn/types.ts';
+import type { WebauthnRegFinishRequest, WebauthnRegStartRequest } from '$mfa/webauthn/types.ts';
 import { getCsrfToken, promiseTimeout } from '$utils/helpers';
 
 export interface WebauthnRegResult {
@@ -14,11 +14,13 @@ export async function webauthnReg(
     magicLinkId?: string,
     pwdCsrfToken?: string,
     mfaModTokenId?: string,
+    allowRk?: boolean,
 ): Promise<WebauthnRegResult> {
     let payloadStart: WebauthnRegStartRequest = {
         passkey_name: passkeyName,
         magic_link_id: magicLinkId,
         mfa_mod_token_id: mfaModTokenId,
+        allow_rk: allowRk,
     };
     let headers: HeadersInit = {
         'Content-Type': 'application/json',
@@ -35,17 +37,17 @@ export async function webauthnReg(
         headers,
         body: JSON.stringify(payloadStart),
     });
-    let body = await resStart.json();
-    if ('error' in body) {
+    let bodyStart = await resStart.json();
+    if ('error' in bodyStart) {
         return {
-            error: body.error.message || 'did not receive any registration data',
+            error: bodyStart.error.message || 'did not receive any registration data',
         };
     }
 
     // We need to apply a small hack to make TS happy.
     // The browser expects ArrayBuffers in some places, but the backend sends them as base64 encoded data,
     // which we will decode properly in the following lines.
-    let options = body as unknown as CredentialCreationOptions;
+    let options = bodyStart as unknown as CredentialCreationOptions;
     if (!options.publicKey) {
         let error = 'no publicKey in options from the backend';
         console.error(error, options);
@@ -76,6 +78,10 @@ export async function webauthnReg(
             };
         }
     } catch (e) {
+        // If there is no space left on the device when trying to register a Resident Key, we will
+        // get `err.name === 'NotAllowedError'`. However, This name has multiple meanings, and it
+        // also shows up when the user cancels the operation or something like that. There is no
+        // good way to know when the device has no space left.
         console.error(e);
         const timeout = new Date().getTime() >= expTime;
         return {
@@ -110,6 +116,11 @@ export async function webauthnReg(
     });
     if (resFinish.status === 201) {
         return {};
+    } else if (resFinish.status === 406) {
+        let body = await resFinish.json();
+        return {
+            error: body.error?.message || 'Missing Attestation',
+        };
     } else {
         let body = await resFinish.json();
         return {

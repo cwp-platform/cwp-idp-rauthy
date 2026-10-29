@@ -2,6 +2,7 @@
 
 use crate::entity::sessions::Session;
 use actix_web::http::header::{HeaderName, HeaderValue};
+use rauthy_api_types::users::ActiveOtp;
 use std::fmt::{Display, Formatter};
 
 pub mod api_cookie;
@@ -9,7 +10,9 @@ pub mod database;
 pub mod email;
 pub mod entity;
 pub mod events;
+pub mod fido_mds;
 pub mod html;
+pub mod http_client;
 pub mod ipgeo;
 pub mod language;
 pub mod migration;
@@ -22,6 +25,7 @@ pub enum AuthStep {
     LoggedIn(AuthStepLoggedIn),
     AwaitToSAccept(AwaitToSAccept),
     AwaitWebauthn(AuthStepAwaitWebauthn),
+    AwaitOtpCode(AuthStepAwaitOtp),
     ProviderLink,
 }
 
@@ -48,6 +52,14 @@ pub struct AuthStepAwaitWebauthn {
     pub email: String,
     pub exp: u64,
     pub session: Session,
+}
+
+pub struct AuthStepAwaitOtp {
+    pub code: String,
+    pub header_csrf: (HeaderName, HeaderValue),
+    pub header_origin: Option<(HeaderName, HeaderValue)>,
+    pub email: String,
+    pub active_otps: Vec<ActiveOtp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

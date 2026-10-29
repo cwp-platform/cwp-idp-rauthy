@@ -42,12 +42,12 @@ password_plain = '123SuperSafe'
 
 # If set, this will take the Argon2ID hashed password during the
 # initialization of an empty production database. If both
-# `password_plain` and `pasword_argon2id` are set, the hashed
+# `password_plain` and `password_argon2id` are set, the hashed
 # version will always be prioritized.
 #
 # default: random -> see logs on first start
 # overwritten by: BOOTSTRAP_ADMIN_PASSWORD_ARGON2ID
-pasword_argon2id = '$argon2id$v=19$m=32768,t=3,p=2$mK+3taI5mnA+Gx8OjjKn5Q$XsOmyvt9fr0V7Dghhv3D0aTe/FjF36BfNS5QlxOPep0'
+password_argon2id = '$argon2id$v=19$m=32768,t=3,p=2$mK+3taI5mnA+Gx8OjjKn5Q$XsOmyvt9fr0V7Dghhv3D0aTe/FjF36BfNS5QlxOPep0'
 ```
 
 You can use any tool for hashing as long as the output format is a proper argon2id string.
@@ -109,7 +109,8 @@ rights could look like this:
 ]
 ```
 
-The `secret` can be `{"Plain": "..."}`, `{"Encrypted": "..."}`, or `"generate"`. Plain secrets must be at
+The `secret` can be `{"Plain": "..."}`, `{"Encrypted": "..."}`, or `"generate"`. Plain secrets must
+be at
 least 64 characters long. Encrypted secrets are encrypted with
 [`cryptr`](https://github.com/sebadob/cryptr) and base64-encoded, just like encrypted client
 secrets. Generated API-key secrets store the full usable `name$secret` token in the generated
@@ -124,11 +125,19 @@ bootstrap secret container under `api-key/<name>/token`.
     "access": [
       {
         "group": "Clients",
-        "access_rights": ["read", "create", "update", "delete"]
+        "access_rights": [
+          "read",
+          "create",
+          "update",
+          "delete"
+        ]
       },
       {
         "group": "Secrets",
-        "access_rights": ["read", "update"]
+        "access_rights": [
+          "read",
+          "update"
+        ]
       }
     ]
   }
@@ -251,20 +260,30 @@ the first-boot bootstrap gate and no new generated secret is written.
 
 ```toml
 [bootstrap]
-# Path to the encrypted generated-secret container. If unset, Rauthy stores it
-# below Hiqlite's configured data directory as:
+# Generated bootstrap secrets are written to this encrypted
+# local container before their matching database rows are
+# inserted. Later bootstrap phases use it for generated
+# client secrets, user passwords, and API-key secrets that
+# cannot be reconstructed from the database after insertion.
 #
-# `${cluster.data_dir}/bootstrap.secrets.enc`
+# The file is a single AEAD-encrypted JSON payload. The expiry
+# deadline lives inside that encrypted payload, so expiry
+# checks decrypt the container first.
+#
+# If unset, the default is `${cluster.data_dir}/bootstrap.secrets.enc`.
 #
 # overwritten by: BOOTSTRAP_GENERATED_SECRETS_FILE
 #generated_secrets_file = 'data/bootstrap.secrets.enc'
 
-# Time in seconds before generated bootstrap secrets expire. A value of `0`
-# disables expiry and runtime auto-purge.
+# Duration before generated bootstrap secrets are purged.
+# The default keeps first-start credentials available briefly
+# for local extraction. Set to `0` to disable expiry and runtime
+# auto-purge.
 #
-# default: 600
+# type: duration
+# default: '10m'
 # overwritten by: BOOTSTRAP_GENERATED_SECRETS_TTL
-generated_secrets_ttl = 600
+#generated_secrets_ttl = '10m'
 ```
 
 Use the local CLI to retrieve or purge the encrypted container after first start. The command does
@@ -301,15 +320,28 @@ Clients can request a generated confidential-client secret with `"secret": "gene
     "id": "my-service",
     "name": "My Service",
     "secret": "generate",
-    "redirect_uris": ["https://my-service.example.com/callback"],
+    "redirect_uris": [
+      "https://my-service.example.com/callback"
+    ],
     "enabled": true,
-    "flows_enabled": ["authorization_code", "refresh_token"],
+    "flows_enabled": [
+      "authorization_code",
+      "refresh_token"
+    ],
     "access_token_alg": "EdDSA",
     "id_token_alg": "EdDSA",
     "auth_code_lifetime": 60,
     "access_token_lifetime": 3600,
-    "scopes": ["openid", "profile", "email"],
-    "default_scopes": ["openid", "profile", "email"],
+    "scopes": [
+      "openid",
+      "profile",
+      "email"
+    ],
+    "default_scopes": [
+      "openid",
+      "profile",
+      "email"
+    ],
     "force_mfa": false
   }
 ]
@@ -326,7 +358,9 @@ Users can request a generated password with `"password": "generate"`:
   {
     "email": "admin@example.com",
     "password": "generate",
-    "roles": ["admin"],
+    "roles": [
+      "admin"
+    ],
     "enabled": true,
     "email_verified": true
   }

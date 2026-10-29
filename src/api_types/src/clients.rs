@@ -1,33 +1,39 @@
 use crate::cust_validation::*;
 use crate::oidc::{GrantType, JwkKeyPairAlg};
 use rauthy_common::regex::{
-    RE_CLIENT_ID, RE_CLIENT_ID_STRICT, RE_CLIENT_NAME, RE_GROUPS, RE_SCOPE_SPACE,
+    RE_CLIENT_ID, RE_CLIENT_ID_STRICT, RE_CLIENT_NAME, RE_CLIENT_URI, RE_GROUPS, RE_SCOPE_SPACE,
     RE_TOKEN_ENDPOINT_AUTH_METHOD, RE_URI,
 };
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 use validator::Validate;
 
 // https://openid.net/specs/openid-connect-registration-1_0.html#ClientMetadata
 #[derive(Validate, Deserialize, ToSchema)]
 #[cfg_attr(debug_assertions, derive(Serialize))]
 pub struct DynamicClientRequest {
-    /// Validation: `Vec<^[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]+$>`
+    /// Validation: `Vec<Valid URI with a non-empty host part, without '#' or ','>`
     #[validate(custom(function = "validate_vec_uri"))]
     pub redirect_uris: Vec<String>,
     /// Validation: cannot be empty
     #[validate(length(min = 1))]
     pub grant_types: Vec<GrantType>,
-    /// Validation: `[a-zA-Z0-9À-ÿ-\\s]{2,128}`
-    #[validate(regex(path = "*RE_CLIENT_NAME", code = "[a-zA-Z0-9À-ɏ-\\s]{2,128}"))]
+    /// Validation: `[\p{L}\p{M}\p{N}\p{Zs}()._-]{2,128}`
+    #[validate(regex(
+        path = "*RE_CLIENT_NAME",
+        code = "[\\p{L}\\p{M}\\p{N}\\p{Zs}()._-]{2,128}"
+    ))]
     pub client_name: Option<String>,
-    /// Validation: `[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$`
-    #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$"))]
+    /// Validation: URI with a non-empty host part, e.g. `https://app.example.com`, without `#`
+    /// or `,` (RE_CLIENT_URI)
+    #[validate(regex(
+        path = "*RE_CLIENT_URI",
+        code = "^(?:[a-zA-Z][a-zA-Z0-9+.\\-]*://)?[a-zA-Z0-9](?:[a-zA-Z0-9._\\-]{0,253}[a-zA-Z0-9])?(?::[0-9]{1,5})?(?:[/?][a-zA-Z0-9.:/_\\-&?=~!$'()*+%@]*)?$"
+    ))]
     pub client_uri: Option<String>,
     /// Validation: `Vec<^[a-zA-Z0-9\+.@/-]{0,48}$>`
     #[validate(custom(function = "validate_vec_contact"))]
     pub contacts: Option<Vec<String>>,
-    /// Validation: `^(RS256|RS384|RS512|EdDSA)$`
     pub id_token_signed_response_alg: Option<JwkKeyPairAlg>,
     /// Validation: `^(client_secret_post|client_secret_basic|none)$`
     #[validate(regex(
@@ -35,7 +41,6 @@ pub struct DynamicClientRequest {
         code = "client_secret_post|client_secret_basic|none"
     ))]
     pub token_endpoint_auth_method: Option<String>,
-    /// Validation: `^(RS256|RS384|RS512|EdDSA)$`
     pub token_endpoint_auth_signing_alg: Option<JwkKeyPairAlg>,
     // Rauthy will only accept the following defaults
     // `response_type=code`
@@ -67,8 +72,12 @@ pub struct DynamicClientRequest {
     // - default_acr_values
     // - initiate_login_uri
     // - request_uris (may come in the future with `request_uri` during login)
-    /// Validation: `[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$`
-    #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$"))]
+    /// Validation: URI with a non-empty host part, e.g. `https://app.example.com`, without `#`
+    /// or `,` (RE_CLIENT_URI)
+    #[validate(regex(
+        path = "*RE_CLIENT_URI",
+        code = "^(?:[a-zA-Z][a-zA-Z0-9+.\\-]*://)?[a-zA-Z0-9](?:[a-zA-Z0-9._\\-]{0,253}[a-zA-Z0-9])?(?::[0-9]{1,5})?(?:[/?][a-zA-Z0-9.:/_\\-&?=~!$'()*+%@]*)?$"
+    ))]
     pub post_logout_redirect_uri: Option<String>,
     #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$"))]
     pub backchannel_logout_uri: Option<String>,
@@ -83,19 +92,26 @@ pub struct EphemeralClientRequest {
         code = "^[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]{2,256}$"
     ))]
     pub client_id: String,
-    /// Validation: `[a-zA-Z0-9À-ÿ-\\s]{2,128}`
-    #[validate(regex(path = "*RE_CLIENT_NAME", code = "[a-zA-Z0-9À-ɏ-\\s]{2,128}"))]
+    /// Validation: `[\p{L}\p{M}\p{N}\p{Zs}()._-]{2,128}`
+    #[validate(regex(
+        path = "*RE_CLIENT_NAME",
+        code = "[\\p{L}\\p{M}\\p{N}\\p{Zs}()._-]{2,128}"
+    ))]
     pub client_name: Option<String>,
-    /// Validation: `[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$`
-    #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$"))]
+    /// Validation: URI with a non-empty host part, e.g. `https://app.example.com`, without `#`
+    /// or `,` (RE_CLIENT_URI)
+    #[validate(regex(
+        path = "*RE_CLIENT_URI",
+        code = "^(?:[a-zA-Z][a-zA-Z0-9+.\\-]*://)?[a-zA-Z0-9](?:[a-zA-Z0-9._\\-]{0,253}[a-zA-Z0-9])?(?::[0-9]{1,5})?(?:[/?][a-zA-Z0-9.:/_\\-&?=~!$'()*+%@]*)?$"
+    ))]
     pub client_uri: Option<String>,
     /// Validation: `Vec<^[a-zA-Z0-9\+.@/-]{0,48}$>`
     #[validate(custom(function = "validate_vec_contact"))]
     pub contacts: Option<Vec<String>>,
-    /// Validation: `Vec<^[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]+$>`
+    /// Validation: `Vec<Valid URI with a non-empty host part, without '#' or ','>`
     #[validate(custom(function = "validate_vec_uri"))]
     pub redirect_uris: Vec<String>,
-    /// Validation: `Vec<^[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]+$>`
+    /// Validation: `Vec<Valid URI with a non-empty host part, without '#' or ','>`
     #[validate(custom(function = "validate_vec_uri"))]
     pub post_logout_redirect_uris: Option<Vec<String>>,
     /// Deliberately a `Vec<String>` and not a `Vec<GrantType>`, unlike every other grant-type
@@ -115,9 +131,7 @@ pub struct EphemeralClientRequest {
     pub scope: Option<String>,
     pub require_auth_time: Option<bool>,
 
-    /// Validation: `^(RS256|RS384|RS512|EdDSA)$`
     pub access_token_signed_response_alg: Option<JwkKeyPairAlg>,
-    /// Validation: `^(RS256|RS384|RS512|EdDSA)$`
     pub id_token_signed_response_alg: Option<JwkKeyPairAlg>,
     /// RFC 8707 resource indicators this ephemeral client may request. When present, a
     /// requested `resource` is validated against this list; when absent, `resource` is
@@ -137,15 +151,18 @@ pub struct NewClientRequest {
     /// Validation: None - will not be deserialized
     #[serde(skip_deserializing)]
     pub secret: Option<Vec<u8>>,
-    /// Validation: `[a-zA-Z0-9À-ÿ-\\s]{2,128}`
-    #[validate(regex(path = "*RE_CLIENT_NAME", code = "[a-zA-Z0-9À-ɏ-\\s]{2,128}"))]
+    /// Validation: `[\p{L}\p{M}\p{N}\p{Zs}()._-]{2,128}`
+    #[validate(regex(
+        path = "*RE_CLIENT_NAME",
+        code = "[\\p{L}\\p{M}\\p{N}\\p{Zs}()._-]{2,128}"
+    ))]
     pub name: Option<String>,
     /// Validation: bool
     pub confidential: bool,
-    /// Validation: `Vec<^[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]+$>`
+    /// Validation: `Vec<Valid URI with a non-empty host part, without '#' or ','>`
     #[validate(custom(function = "validate_vec_uri"))]
     pub redirect_uris: Vec<String>,
-    /// Validation: `Vec<^[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]+$>`
+    /// Validation: `Vec<Valid URI with a non-empty host part, without '#' or ','>`
     #[validate(custom(function = "validate_vec_uri"))]
     pub post_logout_redirect_uris: Option<Vec<String>>,
 }
@@ -153,14 +170,17 @@ pub struct NewClientRequest {
 #[derive(Deserialize, Validate, ToSchema)]
 #[cfg_attr(debug_assertions, derive(Serialize))]
 pub struct UpdateClientRequest {
-    /// Validation: `[a-zA-Z0-9À-ÿ-\\s]{2,128}`
-    #[validate(regex(path = "*RE_CLIENT_NAME", code = "[a-zA-Z0-9À-ɏ-\\s]{2,128}"))]
+    /// Validation: `[\p{L}\p{M}\p{N}\p{Zs}()._-]{2,128}`
+    #[validate(regex(
+        path = "*RE_CLIENT_NAME",
+        code = "[\\p{L}\\p{M}\\p{N}\\p{Zs}()._-]{2,128}"
+    ))]
     pub name: Option<String>,
     pub confidential: bool,
-    /// Validation: `Vec<^[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]+$>`
+    /// Validation: `Vec<Valid URI with a non-empty host part, without '#' or ','>`
     #[validate(custom(function = "validate_vec_uri"))]
     pub redirect_uris: Vec<String>,
-    /// Validation: `Vec<^[a-zA-Z0-9,.:/_\\-&?=~#!$'()*+%]+$>`
+    /// Validation: `Vec<Valid URI with a non-empty host part, without '#' or ','>`
     #[validate(custom(function = "validate_vec_uri"))]
     pub post_logout_redirect_uris: Option<Vec<String>>,
     /// Validation: `Vec<^(http|https)://[a-z0-9.:-]+$>`
@@ -170,9 +190,7 @@ pub struct UpdateClientRequest {
     /// Validation: cannot be empty
     #[validate(length(min = 1))]
     pub flows_enabled: Vec<GrantType>,
-    /// Validation: `^(RS256|RS384|RS512|EdDSA)$`
     pub access_token_alg: JwkKeyPairAlg,
-    /// Validation: `^(RS256|RS384|RS512|EdDSA)$`
     pub id_token_alg: JwkKeyPairAlg,
     /// Validation: `10 <= auth_code_lifetime <= 300`
     #[validate(range(min = 10, max = 300))]
@@ -190,12 +208,17 @@ pub struct UpdateClientRequest {
     #[validate(custom(function = "validate_vec_challenge"))]
     pub challenges: Option<Vec<String>>,
     pub force_mfa: bool,
-    /// Validation: `[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$`
-    #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$"))]
+    /// Validation: URI with a non-empty host part, e.g. `https://app.example.com`, without `#`
+    /// or `,` (RE_CLIENT_URI)
+    #[validate(regex(
+        path = "*RE_CLIENT_URI",
+        code = "^(?:[a-zA-Z][a-zA-Z0-9+.\\-]*://)?[a-zA-Z0-9](?:[a-zA-Z0-9._\\-]{0,253}[a-zA-Z0-9])?(?::[0-9]{1,5})?(?:[/?][a-zA-Z0-9.:/_\\-&?=~!$'()*+%@]*)?$"
+    ))]
     pub client_uri: Option<String>,
     /// Validation: `Vec<^[a-zA-Z0-9\+.@/-]{0,48}$>`
     #[validate(custom(function = "validate_vec_contact"))]
     pub contacts: Option<Vec<String>>,
+    /// Validation: `[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$`
     #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$"))]
     pub backchannel_logout_uri: Option<String>,
     /// Validation: `^[a-zA-Z0-9-_/,:*\\s]{2,64}$`
@@ -234,13 +257,28 @@ pub struct ClientSecretRequest {
     pub cache_current_hours: Option<u8>,
 }
 
+#[derive(Debug, Deserialize, Validate, ToSchema, IntoParams)]
+pub struct ClientValidateRedirectUriRequest {
+    /// Validation: URI with a non-empty host part, e.g. `https://app.example.com`, without `#`
+    /// or `,` (RE_CLIENT_URI)
+    #[validate(regex(
+        path = "*RE_CLIENT_URI",
+        code = "^(?:[a-zA-Z][a-zA-Z0-9+.\\-]*://)?[a-zA-Z0-9](?:[a-zA-Z0-9._\\-]{0,253}[a-zA-Z0-9])?(?::[0-9]{1,5})?(?:[/?][a-zA-Z0-9.:/_\\-&?=~!$'()*+%@]*)?$"
+    ))]
+    pub redirect_uri: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema, Validate)]
 pub struct ScimClientRequestResponse {
     /// Validation: `[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$`
     #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$"))]
     pub bearer_token: String,
-    /// Validation: `[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$`
-    #[validate(regex(path = "*RE_URI", code = "[a-zA-Z0-9,.:/_-&?=~#!$'()*+%@]+$"))]
+    /// Validation: URI with a non-empty host part, e.g. `https://app.example.com`, without `#`
+    /// or `,` (RE_CLIENT_URI)
+    #[validate(regex(
+        path = "*RE_CLIENT_URI",
+        code = "^(?:[a-zA-Z][a-zA-Z0-9+.\\-]*://)?[a-zA-Z0-9](?:[a-zA-Z0-9._\\-]{0,253}[a-zA-Z0-9])?(?::[0-9]{1,5})?(?:[/?][a-zA-Z0-9.:/_\\-&?=~!$'()*+%@]*)?$"
+    ))]
     pub base_uri: String,
     pub sync_groups: bool,
     /// Validation: `^[a-zA-Z0-9-_/,:*\\s]{2,64}$`

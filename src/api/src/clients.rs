@@ -1,3 +1,4 @@
+use crate::users::validate_reg_redirect_uri;
 use crate::{ReqPrincipal, content_len_limit};
 use actix_web::http::header::{
     ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, ORIGIN,
@@ -7,14 +8,14 @@ use actix_web::web::{Json, Query};
 use actix_web::{HttpRequest, HttpResponse, delete, get, post, put, web};
 use actix_web_lab::__reexports::futures_util::StreamExt;
 use rauthy_api_types::clients::{
-    ClientResponse, ClientSecretRequest, ClientSecretResponse, DynamicClientRequest,
-    DynamicClientResponse, NewClientRequest, UpdateClientRequest,
+    ClientResponse, ClientSecretRequest, ClientSecretResponse, ClientValidateRedirectUriRequest,
+    DynamicClientRequest, DynamicClientResponse, NewClientRequest, UpdateClientRequest,
 };
 use rauthy_api_types::forward_auth::{ForwardAuthCallbackParams, ForwardAuthParams};
 use rauthy_api_types::generic::LogoParams;
 use rauthy_common::utils::real_ip_from_req;
 use rauthy_data::entity::api_keys::{AccessGroup, AccessRights};
-use rauthy_data::entity::clients::Client;
+use rauthy_data::entity::clients::{Client, validate_dyn_client_redirect_uri};
 use rauthy_data::entity::clients_dyn::ClientDyn;
 use rauthy_data::entity::clients_scim::ClientScim;
 use rauthy_data::entity::failed_backchannel_logout::FailedBackchannelLogout;
@@ -175,10 +176,17 @@ pub async fn post_clients_dyn(
         return Ok(HttpResponse::NotFound().finish());
     }
     payload.validate()?;
+    // Like `validate()`, reject an invalid request before it consumes the per-IP rate limit.
+    for uri in &payload.redirect_uris {
+        validate_dyn_client_redirect_uri(uri)?;
+    }
+    if let Some(uri) = &payload.post_logout_redirect_uri {
+        validate_dyn_client_redirect_uri(uri)?;
+    }
 
     if let Some(token) = &RauthyConfig::get().vars.dynamic_clients.reg_token {
         let bearer = helpers::get_bearer_token_from_header(req.headers())?;
-        if token != &bearer {
+        if !constant_time_eq::constant_time_eq(token.as_bytes(), bearer.as_bytes()) {
             return Ok(HttpResponse::Unauthorized()
                 .insert_header((
                     WWW_AUTHENTICATE,
@@ -249,6 +257,7 @@ pub async fn get_clients_dyn(
         (status = 200, description = "Ok", body = DynamicClientResponse),
         (status = 400, description = "BadRequest"),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
         (status = 404, description = "NotFound"),
     ),
 )]
@@ -547,8 +556,8 @@ pub async fn delete_client_favicon(
 
 /// Generates a new client secret
 ///
-/// Generates a new secret for the given client id and sets the client to `confidential` too, if it was
-/// not the case yet.
+/// Generates a new secret for the given client id and sets the client to `confidential` too, if it
+/// was not the case yet.
 ///
 /// **Permissions**
 /// - rauthy_admin
@@ -702,4 +711,35 @@ pub async fn get_forward_auth_callback(
             Err(err)
         }
     }
+}
+
+/// Validates a given `redirect_uri` if it matches any DB record for a clients' home URL.
+#[utoipa::path(
+    get,
+    path = "/clients/validate_uri",
+    tag = "clients",
+    responses(
+        (status = 200, description = "Ok"),
+        (status = 400, description = "BadRequest", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "NotFound", body = ErrorResponse),
+    ),
+)]
+#[post("/clients/validate_uri")]
+pub async fn post_client_validate_uri(
+    payload: Json<ClientValidateRedirectUriRequest>,
+    _: ReqPrincipal,
+) -> Result<HttpResponse, ErrorResponse> {
+    payload.validate()?;
+
+    // Keep consistent with the register and password-reset flows, which only validate against
+    // the client allow-list when open redirects are disabled.
+    if !RauthyConfig::get()
+        .vars
+        .user_registration
+        .allow_open_redirect
+    {
+        validate_reg_redirect_uri(&payload.redirect_uri).await?;
+    }
+    Ok(HttpResponse::Ok().finish())
 }

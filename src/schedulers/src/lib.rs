@@ -10,6 +10,7 @@ mod devices;
 mod dyn_clients;
 mod email_jobs;
 mod events;
+mod fido_mds;
 mod ip_geo_db;
 mod issued_tokens;
 mod jwks;
@@ -17,6 +18,7 @@ mod magic_links;
 mod passwords;
 mod scim_tasks;
 mod sessions;
+mod sponsor;
 mod tokens;
 mod user_login_states;
 mod users;
@@ -43,6 +45,8 @@ pub fn spawn() {
     tokio::spawn(issued_tokens::cleanup_issued_tokens());
     tokio::spawn(users::user_expiry_checker());
     tokio::spawn(app_version::app_version_check());
+    tokio::spawn(fido_mds::fido_mds_updater());
+    tokio::spawn(sponsor::run_sponsor_reminder());
 }
 
 /// sleeps until the next scheduled event
