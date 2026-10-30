@@ -52,3 +52,9 @@ tasks:
       - mkdir -p out/empty
       - cp target/x86_64-unknown-linux-gnu/release/rauthy out/rauthy_amd64
       - cp target/x86_64-unknown-linux-gnu/release/rauthy target/release/cwp-idp-rauthy
+
+  clean:build:
+    desc: "Очистка build-артефактов и локальных кэшей (освобождение диска)"
+    cmds:
+      - cargo clean
+      - rm -rf frontend/node_modules frontend/build out/empty .tools reports normalized-findings.json
