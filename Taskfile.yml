@@ -46,17 +46,17 @@ tasks:
   build:release:
     desc: "Релизная сборка → out/rauthy_amd64 (упаковывается Dockerfile'ом)"
     cmds:
-    - cd frontend && npm install && npm run build
-    - |
-      # FIDO-MDS: датасет вшивается в бинарь (include_bytes). Качаем ТОЛЬКО если его нет —
-      # иначе КАЖДЫЙ rebuild дёргает mds.fidoalliance.org и упирается в 429 (внешний лимит).
-      # Принудительное плановое обновление: FIDO_MDS_REFRESH=1 task build:release.
-      if [ -f assets/fido_mds/dataset.bin ] && [ -z "${FIDO_MDS_REFRESH:-}" ]; then
-        echo "fido-mds: assets/fido_mds/dataset.bin уже есть — загрузку пропускаю (FIDO_MDS_REFRESH=1 — обновить)"
-      else
-        cargo run --bin fido-mds-prep -- --source https://mds.fidoalliance.org/ --out assets/fido_mds/dataset.bin
-      fi
-    - cargo build --release --target x86_64-unknown-linux-gnu --bin rauthy
+      - cd frontend && npm install && npm run build
+      - |
+        # FIDO-MDS: датасет вшивается в бинарь (include_bytes). Качаем ТОЛЬКО если его нет —
+        # иначе КАЖДЫЙ rebuild дёргает mds.fidoalliance.org и упирается в 429 (внешний лимит).
+        # Принудительное плановое обновление: FIDO_MDS_REFRESH=1 task build:release.
+        if [ -f assets/fido_mds/dataset.bin ] && [ -z "${FIDO_MDS_REFRESH:-}" ]; then
+          echo "fido-mds: assets/fido_mds/dataset.bin уже есть — загрузку пропускаю (FIDO_MDS_REFRESH=1 — обновить)"
+        else
+          cargo run --bin fido-mds-prep -- --source https://mds.fidoalliance.org/ --out assets/fido_mds/dataset.bin
+        fi
+      - cargo build --release --target x86_64-unknown-linux-gnu --bin rauthy
       - mkdir -p out/empty
       - cp target/x86_64-unknown-linux-gnu/release/rauthy out/rauthy_amd64
       - cp target/x86_64-unknown-linux-gnu/release/rauthy target/release/cwp-idp-rauthy
