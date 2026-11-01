@@ -161,10 +161,16 @@ clippy:
     cargo clippy
 
 # fetch the FIDO MDS dataset from the live metadata service into the embedded asset
+# Идемпотентно: если датасет уже есть — НЕ дёргаем внешний сервис (он даёт 429).
+# Принудительное плановое обновление: FIDO_MDS_REFRESH=1 just fido-mds-prep
 fido-mds-prep source="https://mds.fidoalliance.org/" out="assets/fido_mds/dataset.bin":
     #!/usr/bin/env bash
     set -euxo pipefail
 
+    if [ -f {{ out }} ] && [ -z "${FIDO_MDS_REFRESH:-}" ]; then
+        echo "fido-mds: {{ out }} уже есть — пропускаю загрузку (FIDO_MDS_REFRESH=1 — обновить)"
+        exit 0
+    fi
     cargo run --bin fido-mds-prep -- --source {{ source }} --out {{ out }}
 
 # delete the local hiqlite database
