@@ -4,6 +4,15 @@
 > (`sebadob/rauthy`), используемом как Identity Provider платформы CleanAI Cloud.
 > Применяется ко всей работе в этой директории.
 
+## Security-гейт завершения (063, AGENTS §6a)
+
+> **Перед объявлением задачи выполненной** агент ОБЯЗАН прогнать в своём репо ДВА скана и приложить оба отчёта:
+> 1. **`task cwp:security`** — fast-скан по ДЕРЕВУ (фетчит хаб `cwp-security` по единой версии системы) → `reports/security-report.json` с `verdict=PASS`;
+> 2. **`task cwp:security:image`** — IMAGE-слой: сборка образа сервиса (`Dockerfile`) → `trivy image` (vuln/secret) → `reports/security-report-image.json` с `verdict=PASS`.
+> **Без ОБОИХ зелёных отчётов задача НЕ завершена.** Fast-скан видит только дерево; уязвимые пакеты живут ВНУТРИ образа (базовый слой + бинарь и зависимости) — их ловит image-слой. Унаследованное от базового слоя гасится **baseline** (`security-baseline-image.json`, `task cwp:security:image:baseline`), а не «на глаз»: гейт блокирует только НОВЫЕ `Critical` (и `High` по SLA).
+> Подделка/ручная правка отчётов запрещена; вердикт — только из прогона `gate.mjs` (exit 0/1/2).
+> **Сканы — ТОЛЬКО ЛОКАЛЬНО** (и на тест-стенде): GitHub Actions для security-сканов ЗАПРЕЩЁН (ADR-0033).
+
 ## 1. Роль
 
 - **Identity Provider (Rauthy, Rust) + расширение консентов (152-ФЗ).**

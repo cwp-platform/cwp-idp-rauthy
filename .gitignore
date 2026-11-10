@@ -33,3 +33,8 @@ assets/static_html/
 **/*.log
 /assets/fido_mds/dataset.bin
 /data_old
+# Локальные клоны-контуры (063): cwp-infra (task cwp:*) и хаб cwp-security (task cwp:security,
+# cwp:security:image). Pull-модель: клонируются в репо, в git не попадают.
+.cwp-infra/
+.cwp-security/
+.cwp-docs/
