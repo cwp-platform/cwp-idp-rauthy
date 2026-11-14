@@ -38,6 +38,14 @@ tasks:
           git -c advice.detachedHead=false clone --depth 1 --branch {{.CWP_INFRA_REF}} "$INFRA_REPO" .cwp-infra
         fi
 
+  docs:
+    silent: true
+    desc: "Подтягивает документацию cwp-docs в .cwp-docs (sparse, профиль infra-devops)"
+    deps:
+      - bootstrap
+    cmds:
+      - task cwp:docs DOCS_PROFILE=infra-devops DOCS_SERVICE=cwp-idp-rauthy
+
   build:
     desc: "Сборка rauthy (cargo build)"
     cmds:
