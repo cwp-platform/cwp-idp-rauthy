@@ -30,13 +30,24 @@ tasks:
         fi
         : "${CWP_GH_BASE:?CWP_GH_BASE не задана: окружение (CI) или локальный .env (см. env.example)}"
         INFRA_REPO="${CWP_INFRA_REPO:-${CWP_GH_BASE}/cwp-infra.git}"
-        if [ -d .cwp-infra/.git ]; then
-          git -C .cwp-infra fetch --depth 1 origin {{.CWP_INFRA_REF}}
-          git -c advice.detachedHead=false -C .cwp-infra reset --hard FETCH_HEAD
-        else
-          rm -rf .cwp-infra
-          git -c advice.detachedHead=false clone --depth 1 --branch {{.CWP_INFRA_REF}} "$INFRA_REPO" .cwp-infra
-        fi
+        # `.cwp-infra` — разделяемый кэш: параллельные `task` дают гонку `shallow file has changed` (fatal),
+        # а `fetch --depth 1` подвижной ветки накапливает shallow-границы (1→2→3…). Лечим ПОД локом:
+        # flock (сериализация) + пересоздание кэша при накоплении. Lock — в `.git` (не трекается).
+        CWP_LOCKDIR="$(git rev-parse --git-dir 2>/dev/null || echo .git)/cwp-locks"
+        mkdir -p "$CWP_LOCKDIR"
+        flock -x "$CWP_LOCKDIR/cwp-bootstrap.lock" sh -c '
+          set -e
+          if [ -d .cwp-infra/.git ] && [ "$(wc -l < .cwp-infra/.git/shallow 2>/dev/null || echo 1)" -gt 1 ]; then
+            echo "(cwp-infra: shallow-границ > 1 — пересоздание кэша)"; rm -rf .cwp-infra
+          fi
+          if [ -d .cwp-infra/.git ]; then
+            git -C .cwp-infra fetch --depth 1 origin "$1"
+            git -C .cwp-infra reset --hard FETCH_HEAD
+          else
+            rm -rf .cwp-infra
+            git -c advice.detachedHead=false clone --depth 1 --branch "$1" "$2" .cwp-infra
+          fi
+        ' _ {{.CWP_INFRA_REF}} "$INFRA_REPO"
 
   docs:
     silent: true
